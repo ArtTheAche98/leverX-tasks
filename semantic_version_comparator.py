@@ -1,7 +1,7 @@
 import functools
 import re
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional, Tuple, Union
+from typing import ClassVar, Optional
 
 
 @functools.total_ordering
@@ -25,7 +25,7 @@ class Version:
     major: int
     minor: int
     patch: int
-    prerelease: Tuple[Union[int, str], ...] = field(default_factory=tuple)
+    prerelease: tuple[int | str, ...] = field(default_factory=tuple)
     buildmetadata: str = ""
 
     # Class-level regex for parsing semver strings
@@ -72,7 +72,7 @@ class Version:
 
     @classmethod
     def from_parts(cls, major: int, minor: int, patch: int,
-                   prerelease: Optional[Tuple[Union[int, str], ...]] = None,
+                   prerelease: Optional[tuple[int | str, ...]] = None,
                    buildmetadata: str = "") -> 'Version':
         """
         Create a Version object directly from its component parts, avoiding string parsing overhead.
@@ -101,7 +101,7 @@ class Version:
         object.__setattr__(instance, 'buildmetadata', buildmetadata)
         return instance
 
-    def _parse_prerelease(self, prerelease_string: Optional[str]) -> Tuple[Union[int, str], ...]:
+    def _parse_prerelease(self, prerelease_string: Optional[str]) -> tuple[int | str, ...]:
         """
         Parse the prerelease component of a version string.
 
@@ -147,7 +147,7 @@ class Version:
             base_version += f"+{self.buildmetadata}"
         return base_version
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Compare equality of two versions according to SemVer rules.
         Build metadata is ignored in comparisons.
@@ -159,7 +159,7 @@ class Version:
                 self.patch == other.patch and
                 self.prerelease == other.prerelease)
 
-    def __lt__(self, other: Any) -> bool:
+    def __lt__(self, other: object) -> bool:
         """
         Compare versions according to SemVer precedence rules.
         Precedence is determined by the first difference when comparing:
@@ -200,10 +200,6 @@ class Version:
 
         # If all common identifiers are equal, shorter list has lower precedence
         return len(self.prerelease) < len(other.prerelease)
-
-    def __repr__(self) -> str:
-        """Return a string that could be used to recreate this object."""
-        return f"Version('{self}')"
 
     def __hash__(self) -> int:
         """
