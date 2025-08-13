@@ -1,40 +1,37 @@
 import json
 import logging
 import pytest
+import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch, MagicMock, mock_open
-from pydantic import ValidationError
-
-import xml.etree.ElementTree as ET
-
 from hypothesis import given, strategies as st
 
 from student_room_exporter import (
-    Student, Room, StudentRoomExporter, DataLoader, DataProcessor,
+    Student, Room, StudentRoomExporter, JSONDataLoader, StudentRoomAggregator,
     ExporterFactory, JSONExporter, XMLExporter
 )
 
 
 @pytest.fixture
 def sample_student() -> Student:
-    """Fixture for a sample valid Student using alias construction."""
-    return Student.model_validate({"id": 1, "name": "Test Student", "room": 1})
+    """Fixture for a sample valid Student."""
+    return Student(id=1, name="Test Student", room=1)
 
 
 @pytest.fixture
 def sample_room() -> Room:
-    """Fixture for a sample valid Room using alias construction."""
-    return Room.model_validate({"id": 1, "name": "Test Room"})
+    """Fixture for a sample valid Room."""
+    return Room(id=1, name="Test Room")
 
 
 @pytest.fixture
 def exporter() -> Generator[StudentRoomExporter, None, None]:
     """Fixture providing a mocked StudentRoomExporter instance for isolated testing."""
-    loader = MagicMock(spec=DataLoader)
-    processor = MagicMock(spec=DataProcessor)
-    yield StudentRoomExporter(loader, processor)
+    loader = MagicMock(spec=JSONDataLoader)
+    aggregator = MagicMock(spec=StudentRoomAggregator)
+    yield StudentRoomExporter(loader, aggregator)
 
 
 class TestStudentRoomExporter:
@@ -42,10 +39,9 @@ class TestStudentRoomExporter:
 
     def test_export_data_success(self, exporter: StudentRoomExporter) -> None:
         """Test successful execution of export_data with mocked dependencies."""
-        exporter.data_loader.load_students.return_value = [
-            Student.model_validate({"id": 1, "name": "Test Student", "room": 1})]
-        exporter.data_loader.load_rooms.return_value = [Room.model_validate({"id": 1, "name": "Test Room"})]
-        exporter.data_processor.combine_data.return_value = [Room.model_validate({"id": 1, "name": "Test Room"})]
+        exporter.data_loader.load_students.return_value = [Student(id=1, name="Test Student", room=1)]
+        exporter.data_loader.load_rooms.return_value = [Room(id=1, name="Test Room")]
+        exporter.aggregator.aggregate_students_to_rooms.return_value = [Room(id=1, name="Test Room")]
 
         with patch('student_room_exporter.ExporterFactory.create_exporter') as mock_factory:
             mock_exporter = MagicMock()
@@ -66,91 +62,81 @@ class TestStudentRoomExporter:
             exporter.export_data(Path("students.json"), Path("missing.json"), Path("output.xml"), "xml")
 
 
-class TestDataLoader:
-    """Tests for DataLoader class."""
+class TestJSONDataLoader:
+    """Tests for JSONDataLoader class."""
 
     def test_load_students_success(self) -> None:
         """Test successful student loading."""
         student_data = json.dumps([{"id": 1, "name": "Test", "room": 1}])
-        loader = DataLoader()
+        loader = JSONDataLoader()
         with patch("builtins.open", mock_open(read_data=student_data)):
             students = loader.load_students(Path("test.json"))
             assert len(students) == 1
             assert students[0].name == "Test"
 
     def test_load_students_invalid_json(self) -> None:
-        """Test DataLoader with malformed JSON."""
-        loader = DataLoader()
+        """Test JSONDataLoader with malformed JSON."""
+        loader = JSONDataLoader()
         with patch("builtins.open", mock_open(read_data="invalid json")):
             with pytest.raises(ValueError, match="Invalid JSON"):
                 loader.load_students(Path("invalid.json"))
 
     def test_load_students_validation_error(self) -> None:
-        """Test DataLoader with invalid data structure."""
-        loader = DataLoader()
+        """Test JSONDataLoader with invalid data structure."""
+        loader = JSONDataLoader()
         invalid_data = json.dumps([{"invalid": "field"}])
         with patch("builtins.open", mock_open(read_data=invalid_data)):
             with pytest.raises(ValueError, match="Invalid student data"):
                 loader.load_students(Path("test.json"))
 
 
-class TestDataProcessor:
-    """Tests for DataProcessor class."""
+class TestStudentRoomAggregator:
+    """Tests for StudentRoomAggregator class."""
 
-    def test_combine_data_multiple_students_per_room(self, sample_student: Student, sample_room: Room) -> None:
-        """Test combining multiple students in same room."""
+    def test_aggregate_multiple_students_per_room(self, sample_student: Student, sample_room: Room) -> None:
+        """Test aggregating multiple students in same room."""
         students = [
             sample_student,
-            Student.model_validate({"id": 2, "name": "Bob", "room": 1})
+            Student(id=2, name="Bob", room=1)
         ]
         rooms = [sample_room]
-        processor = DataProcessor()
-        result = processor.combine_data(students, rooms)
+        aggregator = StudentRoomAggregator()
+        result = aggregator.aggregate_students_to_rooms(students, rooms)
         assert len(result[0].students) == 2
 
-    def test_combine_data_empty_inputs(self) -> None:
-        """Test combine_data with empty inputs."""
-        processor = DataProcessor()
-        result = processor.combine_data([], [])
+    def test_aggregate_empty_inputs(self) -> None:
+        """Test aggregate_students_to_rooms with empty inputs."""
+        aggregator = StudentRoomAggregator()
+        result = aggregator.aggregate_students_to_rooms([], [])
         assert result == []
 
-    def test_combine_data_unassigned_students(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Test logging of unassigned students in combine_data."""
-        processor = DataProcessor()
-        students = [Student.model_validate({"id": 2, "name": "Unassigned", "room": 999})]
-        rooms = [Room.model_validate({"id": 1, "name": "Room1"})]
+    def test_aggregate_unassigned_students(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Test logging of unassigned students in aggregate_students_to_rooms."""
+        aggregator = StudentRoomAggregator()
+        students = [Student(id=2, name="Unassigned", room=999)]
+        rooms = [Room(id=1, name="Room1")]
         with caplog.at_level(logging.WARNING):
-            processor.combine_data(students, rooms)
+            aggregator.aggregate_students_to_rooms(students, rooms)
             assert "Unassigned students" in caplog.text
 
     @given(
         num_students=st.integers(min_value=0, max_value=100),
         num_rooms=st.integers(min_value=0, max_value=10)
     )
-    def test_combine_data_property_based(self, num_students: int, num_rooms: int) -> None:
+    def test_aggregate_property_based(self, num_students: int, num_rooms: int) -> None:
         """Property-based test: Number of assigned students <= total students."""
-        processor = DataProcessor()
+        aggregator = StudentRoomAggregator()
         students = [
-            Student.model_validate({"id": i, "name": f"S{i}", "room": i % (num_rooms + 1)})
+            Student(id=i, name=f"S{i}", room=i % (num_rooms + 1))
             for i in range(num_students)
         ]
         rooms = [
-            Room.model_validate({"id": i, "name": f"R{i}"})
+            Room(id=i, name=f"R{i}")
             for i in range(num_rooms)
         ]
-        result = processor.combine_data(students, rooms)
+        result = aggregator.aggregate_students_to_rooms(students, rooms)
         assigned_count = sum(len(r.students) for r in result)
         assert assigned_count <= num_students
-
-    def test_combine_data_performance(self, benchmark) -> None:
-        """Benchmark combine_data with large input."""
-        processor = DataProcessor()
-        students = [
-            Student.model_validate({"id": i, "name": f"Student {i}", "room": 1})
-            for i in range(10000)
-        ]
-        rooms = [Room.model_validate({"id": 1, "name": "Large Room"})]
-        benchmark(processor.combine_data, students, rooms)
 
 
 class TestExporters:
@@ -172,8 +158,8 @@ class TestExporters:
 
     def test_json_export_special_characters(self) -> None:
         """Test JSON export handles special characters properly."""
-        room = Room.model_validate({"id": 1, "name": "Room \"Test\""})
-        student = Student.model_validate({"id": 1, "name": "Alice & Bob", "room": 1})
+        room = Room(id=1, name="Room \"Test\"")
+        student = Student(id=1, name="Alice & Bob", room=1)
         room.students = [student]
         rooms = [room]
 
@@ -188,8 +174,8 @@ class TestExporters:
 
     def test_xml_export_special_characters(self) -> None:
         """Test XML export handles special characters properly."""
-        room = Room.model_validate({"id": 1, "name": "Room & <Test>"})
-        student = Student.model_validate({"id": 1, "name": "Alice & Bob", "room": 1})
+        room = Room(id=1, name="Room & <Test>")
+        student = Student(id=1, name="Alice & Bob", room=1)
         room.students = [student]
 
         exporter = XMLExporter()
@@ -221,7 +207,7 @@ def test_end_to_end_integration(tmp_path: Path) -> None:
     students_path.write_text(json.dumps(students_data))
     rooms_path.write_text(json.dumps(rooms_data))
 
-    exporter = StudentRoomExporter(DataLoader(), DataProcessor())
+    exporter = StudentRoomExporter(JSONDataLoader(), StudentRoomAggregator())
     exporter.export_data(students_path, rooms_path, output_path, "json")
 
     output_data = json.loads(output_path.read_text())

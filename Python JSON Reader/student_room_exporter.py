@@ -1,284 +1,317 @@
-import argparse
-import json
-import logging
-import xml.etree.ElementTree as ET
-
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import List, Protocol
 
-from pydantic import BaseModel, Field, ValidationError
+import json
+import xml.etree.ElementTree as ET
+import logging.config
+import click
 
+from dataclasses import dataclass, field
+from typing import Dict, Any
 
-class Student(BaseModel):
-    """Model representing a student with validation."""
-    student_id: int = Field(alias="id", ge=0, description="Unique student identifier")
-    name: str = Field(min_length=1, description="Student's full name")
-    room: int = Field(ge=0, description="Room number assigned to student")
+LOGGING_CONFIG = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+    },
+    'loggers': {
+        '': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False
+        }
+    }
+}
 
-class Room(BaseModel):
-    """Model representing a room with validation."""
-    room_id: int = Field(alias="id", ge=0, description="Unique room identifier")
-    name: str = Field(min_length=1, description="Room display name")
-    students: list[Student] = Field(default_factory=list, description="Students assigned to this room")
-
-
-class DataLoader:
-    """Handles loading and parsing of JSON data files."""
-
-    @staticmethod
-    def load_students(file_path: Path) -> list[Student]:
-        """
-        Load and validate student data from JSON file.
-
-        Args:
-            file_path: Path to the students JSON file
-
-        Returns:
-            List of validated Student objects
-
-        Raises:
-            FileNotFoundError: If the file doesn't exist
-            ValueError: If JSON is invalid or data validation fails
-        """
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                data = json.load(file)
-                return [Student(**student_data) for student_data in data]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Students file not found: {file_path}")
-        except json.JSONDecodeError as error:
-            raise ValueError(f"Invalid JSON in students file: {error}")
-        except ValidationError as e:
-            raise ValueError(f"Invalid student data: {e}")
-
-    @staticmethod
-    def load_rooms(file_path: Path) -> list[Room]:
-        """
-        Load and validate room data from JSON file.
-
-        Args:
-            file_path: Path to the rooms JSON file
-
-        Returns:
-            List of validated Room objects
-
-        Raises:
-            FileNotFoundError: If the file doesn't exist
-            ValueError: If JSON is invalid or data validation fails
-        """
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                data = json.load(file)
-                return [Room(**room_data) for room_data in data]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Rooms file not found: {file_path}")
-        except json.JSONDecodeError as error:
-            raise ValueError(f"Invalid JSON in rooms file: {error}")
-        except ValidationError as e:
-            raise ValueError(f"Invalid room data: {e}")
+logging.config.dictConfig(LOGGING_CONFIG)
+logger = logging.getLogger(__name__)
 
 
-class DataProcessor:
-    """Processes and combines student and room data."""
-
-    @staticmethod
-    def combine_data(students: list[Student], rooms: list[Room]) -> list[Room]:
-        """
-        Combine students with their assigned rooms.
-
-        Args:
-            students: List of Student objects
-            rooms: List of Room objects
-
-        Returns:
-            List of Room objects with assigned students
-        """
-        room_dict = {room.room_id: room for room in rooms}
-        unassigned = []
-
-        for student in students:
-            if student.room in room_dict:
-                room_dict[student.room].students.append(student)
-            else:
-                unassigned.append(student.student_id)
-
-        if unassigned:
-            logging.warning(f"Unassigned students (no matching room): {unassigned}")
-
-        return list(room_dict.values())
+@dataclass
+class Student:
+    """Represents a student with ID, name, and assigned room number."""
+    id: int
+    name: str
+    room: int
 
 
-class Exporter(ABC):
-    """Abstract base class for data exporters."""
+@dataclass
+class Room:
+    """Represents a room with ID, name, and list of assigned students."""
+    id: int
+    name: str
+    students: List[Student] = field(default_factory=list)
 
-    @abstractmethod
-    def export(self, data: list[Room], output_path: Path) -> None:
-        """
-        Export room data to specified format.
-
-        Args:
-            data: List of Room objects to export
-            output_path: Path where to save the exported data
-        """
-        pass
-
-
-class JSONExporter(Exporter):
-    """Exports data to JSON format."""
-
-    def export(self, data: list[Room], output_path: Path) -> None:
-        """
-        Export room data to JSON file.
-
-        Args:
-            data: List of Room objects to export
-            output_path: Path where to save the JSON file
-        """
-        json_data = [self._room_to_dict(room) for room in data]
-
-        with open(output_path, 'w', encoding='utf-8') as file:
-            json.dump(json_data, file, indent=2, ensure_ascii=False)
-
-    @staticmethod
-    def _room_to_dict(room: Room) -> dict[str, Any]:
-        """Convert Room object to dictionary for JSON serialization."""
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert room to dictionary for export."""
         return {
-            "id": room.room_id,
-            "name": room.name,
+            "id": self.id,
+            "name": self.name,
             "students": [
-                {
-                    "id": student.student_id,
-                    "name": student.name,
-                    "room": student.room
-                }
-                for student in room.students
+                {"id": s.id, "name": s.name, "room": s.room}
+                for s in self.students
             ]
         }
 
 
-class XMLExporter(Exporter):
-    """Exports data to XML format."""
+class DataLoaderProtocol(Protocol):
+    """Protocol defining the interface for data loading operations."""
 
-    def export(self, data: list[Room], output_path: Path) -> None:
-        """
-        Export room data to XML file.
+    def load_students(self, file_path: Path) -> List[Student]:
+        """Load students from file."""
+        ...
 
-        Args:
-            data: List of Room objects to export
-            output_path: Path where to save the XML file
-        """
-        root = ET.Element("rooms")
-
-        for room in data:
-            self._add_room_to_xml(root, room)
-
-        tree = ET.ElementTree(root)
-        ET.indent(tree, space="  ", level=0)
-        tree.write(output_path, encoding='utf-8', xml_declaration=True)
-
-    @staticmethod
-    def _add_room_to_xml(parent: ET.Element, room: Room) -> None:
-        """Add Room data to XML element."""
-        room_element = ET.SubElement(parent, "room")
-        room_element.set("id", str(room.room_id))
-        room_element.set("name", room.name)
-
-        for student in room.students:
-            student_element = ET.SubElement(room_element, "student")
-            student_element.set("id", str(student.student_id))
-            student_element.set("name", student.name)
-            student_element.set("room", str(student.room))
+    def load_rooms(self, file_path: Path) -> List[Room]:
+        """Load rooms from file."""
+        ...
 
 
-class ExporterFactory:
-    """Factory for creating appropriate exporter instances."""
+class StudentRoomAggregatorProtocol(Protocol):
+    """Protocol defining the interface for combining student and room data."""
 
-    _exporters = {
-        'json': JSONExporter,
-        'xml': XMLExporter
-    }
-
-    @classmethod
-    def create_exporter(cls, format_type: str) -> Exporter:
-        """
-        Create exporter instance based on format type.
-
-        Args:
-            format_type: Type of exporter ('json' or 'xml')
-
-        Returns:
-            Appropriate Exporter instance
-
-        Raises:
-            ValueError: If format type is not supported
-        """
-        exporter_class = cls._exporters.get(format_type.lower())
-        if not exporter_class:
-            supported_formats = ', '.join(cls._exporters.keys())
-            raise ValueError(f"Unsupported format: {format_type}. "
-                             f"Supported formats: {supported_formats}")
-        return exporter_class()
+    def aggregate_students_to_rooms(self, students: List[Student], rooms: List[Room]) -> List[Room]:
+        """Combine students with their assigned rooms."""
+        ...
 
 
-class StudentRoomExporter:
-    """Main application class that orchestrates the export process."""
+class DataExporterProtocol(Protocol):
+    """Protocol defining the interface for data export operations."""
 
-    def __init__(self, data_loader: DataLoader, data_processor: DataProcessor):
-        """
-        Initialize the exporter with dependencies.
+    def export(self, rooms: List[Room], output_path: Path) -> None:
+        """Export rooms data to specified path."""
+        ...
 
-        Args:
-            data_loader: Instance for loading data from files
-            data_processor: Instance for processing and combining data
-        """
-        self.data_loader = data_loader
-        self.data_processor = data_processor
 
-    def export_data(self, students_file: Path, rooms_file: Path,
-                    output_file: Path, export_format: str) -> None:
-        """
-        Main method to load, process, and export data.
+class JSONDataLoader:
+    """Loads student and room data from JSON files."""
 
-        Args:
-            students_file: Path to students JSON file
-            rooms_file: Path to rooms JSON file
-            output_file: Path for output file
-            export_format: Output format ('json' or 'xml')
-        """
+    def load_students(self, file_path: Path) -> List[Student]:
+        """Load and validate student data from JSON file."""
         try:
-            students = self.data_loader.load_students(students_file)
-            rooms = self.data_loader.load_rooms(rooms_file)
+            with open(file_path, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {file_path}: {e}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Student file not found: {file_path}")
 
-            processed_rooms = self.data_processor.combine_data(students, rooms)
+        try:
+            return [
+                Student(id=item["id"], name=item["name"], room=item["room"])
+                for item in data
+            ]
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"Invalid student data structure: {e}")
 
-            exporter = ExporterFactory.create_exporter(export_format)
-            exporter.export(processed_rooms, output_file)
+    def load_rooms(self, file_path: Path) -> List[Room]:
+        """Load and validate room data from JSON file."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {file_path}: {e}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Room file not found: {file_path}")
 
-            logging.info(f"Data successfully exported to {output_file}")
+        try:
+            return [
+                Room(id=item["id"], name=item["name"])
+                for item in data
+            ]
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"Invalid room data structure: {e}")
 
-        except Exception as error:
-            logging.error(f"Unexpected error: {error}")
+
+class StudentRoomAggregator:
+    """Combines student data with room assignments."""
+
+    def aggregate_students_to_rooms(self, students: List[Student], rooms: List[Room]) -> List[Room]:
+        """Assign students to their corresponding rooms and log unassigned students."""
+        room_map = {room.id: room for room in rooms}
+        unassigned_students = []
+
+        for student in students:
+            if student.room in room_map:
+                room_map[student.room].students.append(student)
+            else:
+                unassigned_students.append(student)
+
+        if unassigned_students:
+            logger.warning(
+                "Unassigned students found: %s",
+                [f"{s.name} (room {s.room})" for s in unassigned_students]
+            )
+
+        return rooms
+
+
+class JSONExporter:
+    """Exports room data to JSON format."""
+
+    def export(self, rooms: List[Room], output_path: Path) -> None:
+        """Export rooms data to JSON file."""
+        try:
+            data = [room.to_dict() for room in rooms]
+            with open(output_path, 'w', encoding='utf-8') as file:
+                json.dump(data, file, indent=2, ensure_ascii=False)
+            logger.info("Successfully exported data to %s", output_path)
+        except Exception as e:
+            logger.exception("Failed to export to JSON")
             raise
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+class XMLExporter:
+    """Exports room data to XML format."""
 
-    parser = argparse.ArgumentParser(description="Export student-room data.")
-    parser.add_argument("students_file", type=Path, help="Path to students.json")
-    parser.add_argument("rooms_file", type=Path, help="Path to rooms.json")
-    parser.add_argument("output_file", type=Path, help="Output file path")
-    parser.add_argument("format", choices=["json", "xml"], help="Export format")
-    args = parser.parse_args()
+    def export(self, rooms: List[Room], output_path: Path) -> None:
+        """Export rooms data to XML file."""
+        try:
+            root = ET.Element("rooms")
 
-    if not args.output_file.suffix:
-        extension = ".json" if args.format == "json" else ".xml"
-        args.output_file = args.output_file.with_suffix(extension)
-        logging.info(f"Appended extension: {args.output_file}")
+            for room in rooms:
+                room_elem = ET.SubElement(root, "room")
+                room_elem.set("id", str(room.id))
+                room_elem.set("name", room.name)
 
-    exporter = StudentRoomExporter(DataLoader(), DataProcessor())
-    exporter.export_data(args.students_file, args.rooms_file, args.output_file, args.format)
+                for student in room.students:
+                    student_elem = ET.SubElement(room_elem, "student")
+                    student_elem.set("id", str(student.id))
+                    student_elem.set("name", student.name)
+                    student_elem.set("room", str(student.room))
+
+            tree = ET.ElementTree(root)
+            tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            logger.info("Successfully exported data to %s", output_path)
+        except Exception as e:
+            logger.exception("Failed to export to XML")
+            raise
+
+
+class ExporterFactory:
+    """Factory for creating appropriate data exporters."""
+
+    @staticmethod
+    def create_exporter(export_format: str) -> DataExporterProtocol:
+        """Create exporter based on specified format."""
+        exporters = {
+            "json": JSONExporter,
+            "xml": XMLExporter
+        }
+
+        if export_format not in exporters:
+            raise ValueError(f"Unsupported format: {export_format}. Supported: {list(exporters.keys())}")
+
+        return exporters[export_format]()
+
+
+class StudentRoomExporter:
+    """Main class orchestrating the student-room data export process."""
+
+    def __init__(
+            self,
+            data_loader: DataLoaderProtocol,
+            aggregator: StudentRoomAggregatorProtocol
+    ):
+        self.data_loader = data_loader
+        self.aggregator = aggregator
+
+    def export_data(
+            self,
+            students_path: Path,
+            rooms_path: Path,
+            output_path: Path,
+            export_format: str
+    ) -> None:
+        """Complete export workflow: load, process, and export data."""
+        try:
+            logger.info("Starting data export process")
+
+            students = self.data_loader.load_students(students_path)
+            rooms = self.data_loader.load_rooms(rooms_path)
+
+            logger.info("Loaded %d students and %d rooms", len(students), len(rooms))
+
+            processed_rooms = self.aggregator.aggregate_students_to_rooms(students, rooms)
+
+            exporter = ExporterFactory.create_exporter(export_format)
+            exporter.export(processed_rooms, output_path)
+
+            logger.info("Export process completed successfully")
+
+        except Exception as e:
+            logger.exception("Export process failed")
+            raise
+
+
+class CLIApplication:
+    """Command line interface for the student room exporter."""
+
+    def __init__(self):
+        self.exporter = StudentRoomExporter(
+            JSONDataLoader(),
+            StudentRoomAggregator()
+        )
+
+    def run(self) -> None:
+        """Set up and run the CLI application."""
+
+        @click.command()
+        @click.argument('students_file', type=click.Path(exists=True, path_type=Path))
+        @click.argument('rooms_file', type=click.Path(exists=True, path_type=Path))
+        @click.argument('output_file', type=click.Path(path_type=Path))
+        @click.option(
+            '--format',
+            type=click.Choice(['json', 'xml'], case_sensitive=False),
+            required=True,
+            help='Output format (json or xml)'
+        )
+        def export_command(
+                students_file: Path,
+                rooms_file: Path,
+                output_file: Path,
+                format: str
+        ) -> None:
+            """Export student room assignments to specified format.
+
+            STUDENTS_FILE: Path to JSON file containing student data
+            ROOMS_FILE: Path to JSON file containing room data  
+            OUTPUT_FILE: Path for the exported output file
+
+            Example:
+                python student_room_exporter.py students.json rooms.json output.json --format json
+             OR
+                python student_room_exporter.py students.json rooms.json output.xml --format xml
+            """
+            try:
+                self.exporter.export_data(
+                    students_file,
+                    rooms_file,
+                    output_file,
+                    format.lower()
+                )
+            except Exception as e:
+                logger.exception("Application failed")
+                raise click.ClickException(f"Export failed: {e}")
+
+        export_command()
+
+
+def main() -> None:
+    """Entry point for the application."""
+    app = CLIApplication()
+    app.run()
+
 
 if __name__ == "__main__":
     main()
