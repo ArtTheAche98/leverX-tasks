@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 import json
 import mysql.connector
 from pathlib import Path
+from config import settings
 import logging.config
 
 
@@ -66,16 +67,6 @@ class DatabaseConnectionInterface(ABC):
         pass
 
 
-class DataLoaderInterface(ABC):
-    @abstractmethod
-    def load_students(self, file_path: Path) -> List[Student]:
-        pass
-
-    @abstractmethod
-    def load_rooms(self, file_path: Path) -> List[Room]:
-        pass
-
-
 class DatabaseSchemaManagerInterface(ABC):
     @abstractmethod
     def create_schema(self, connection: mysql.connector.MySQLConnection) -> None:
@@ -112,6 +103,15 @@ class StudentRoomAnalyticsInterface(ABC):
         pass
 
 
+class BaseJSONLoader(ABC):
+    def prepare_data(self, file_path: Path) -> Any:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    @abstractmethod
+    def load(self, file_path: Path):
+        pass
+
 class MySQLDatabaseConnection(DatabaseConnectionInterface):
     def __init__(self, host: str, user: str, password: str, database: str):
         self.host = host
@@ -131,42 +131,6 @@ class MySQLDatabaseConnection(DatabaseConnectionInterface):
             return connection
         except mysql.connector.Error as error:
             logger.exception(f"Failed to connect to database: {error}")
-            raise
-
-
-class JSONDataLoader(DataLoaderInterface):
-    def load_students(self, file_path: Path) -> List[Student]:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                students_data = json.load(file)
-                students = [
-                    Student(
-                        id=student_data['id'],
-                        name=student_data['name'],
-                        birthday=student_data['birthday'],
-                        room=student_data['room'],
-                        sex=student_data['sex']
-                    )
-                    for student_data in students_data
-                ]
-                logger.info(f"Loaded {len(students)} students from {file_path}")
-                return students
-        except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
-            logger.exception(f"Failed to load students from {file_path}")
-            raise
-
-    def load_rooms(self, file_path: Path) -> List[Room]:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                rooms_data = json.load(file)
-                rooms = [
-                    Room(id=room_data['id'], name=room_data['name'])
-                    for room_data in rooms_data
-                ]
-                logger.info(f"Loaded {len(rooms)} rooms from {file_path}")
-                return rooms
-        except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
-            logger.exception(f"Failed to load rooms from {file_path}")
             raise
 
 
@@ -241,22 +205,30 @@ class MySQLSchemaManager(DatabaseSchemaManagerInterface):
         finally:
             cursor.close()
 
+    def clear_tables(self, connection: mysql.connector.MySQLConnection) -> None:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("DELETE FROM students")
+            cursor.execute("DELETE FROM rooms")
+            connection.commit()
+            logger.info("Cleared tables (students, rooms)")
+        except mysql.connector.Error:
+            logger.exception("Failed clearing tables")
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
 class MySQLDataInserter(DataInserterInterface):
     def insert_rooms(self, connection: mysql.connector.MySQLConnection, rooms: List[Room]) -> None:
         cursor = connection.cursor()
         try:
-            # Clear existing data
-            cursor.execute("DELETE FROM students")
-            cursor.execute("DELETE FROM rooms")
-
             insert_room_query = "INSERT INTO rooms (id, name) VALUES (%s, %s)"
-            room_values = [(room.id, room.name) for room in rooms]
-
-            cursor.executemany(insert_room_query, room_values)
+            values = [(room_obj.id, room_obj.name) for room_obj in rooms]
+            cursor.executemany(insert_room_query, values)
             connection.commit()
-            logger.info(f"Inserted {len(rooms)} rooms successfully")
-
-        except mysql.connector.Error as error:
+            logger.info(f"Inserted {len(rooms)} rooms")
+        except mysql.connector.Error:
             logger.exception("Failed to insert rooms")
             connection.rollback()
             raise
@@ -268,7 +240,7 @@ class MySQLDataInserter(DataInserterInterface):
         try:
             insert_student_query = """
                                    INSERT INTO students (id, name, birthday, room, sex)
-                                   VALUES (%s, %s, %s, %s, %s) \
+                                   VALUES (%s, %s, %s, %s, %s)
                                    """
             student_values = [
                 (student.id, student.name, student.birthday, student.room, student.sex)
@@ -292,12 +264,12 @@ class StudentRoomAnalytics(StudentRoomAnalyticsInterface):
         cursor = connection.cursor(dictionary=True)
         try:
             query = """
-                    SELECT r.id, r.name, COUNT(s.id) as student_count
-                    FROM rooms r
-                             LEFT JOIN students s ON r.id = s.room
-                    GROUP BY r.id, r.name
-                    ORDER BY student_count DESC, r.id \
-                    """
+                SELECT r.id, r.name, COUNT(s.id) AS student_count
+                FROM rooms r
+                LEFT JOIN students s ON r.id = s.room
+                GROUP BY r.id, r.name
+                ORDER BY student_count DESC, r.id
+            """
             cursor.execute(query)
             results = cursor.fetchall()
             logger.info(f"Retrieved room student counts for {len(results)} rooms")
@@ -308,21 +280,20 @@ class StudentRoomAnalytics(StudentRoomAnalyticsInterface):
         finally:
             cursor.close()
 
-    def get_top_rooms_by_avg_age(self, connection: mysql.connector.MySQLConnection, limit: int = 5) -> List[
-        Dict[str, Any]]:
+    def get_top_rooms_by_avg_age(self, connection: mysql.connector.MySQLConnection, limit: int = 5) -> List[Dict[str, Any]]:
         cursor = connection.cursor(dictionary=True)
         try:
             query = """
-                    SELECT r.id, \
-                           r.name,
-                           AVG(DATEDIFF(CURDATE(), s.birthday) / 365.25) as avg_age
-                    FROM rooms r
-                             INNER JOIN students s ON r.id = s.room
-                    GROUP BY r.id, r.name
-                    HAVING COUNT(s.id) > 0
-                    ORDER BY avg_age ASC
-                        LIMIT %s \
-                    """
+                SELECT r.id,
+                       r.name,
+                       AVG(DATEDIFF(CURDATE(), s.birthday) / 365.25) AS avg_age
+                FROM rooms r
+                INNER JOIN students s ON r.id = s.room
+                GROUP BY r.id, r.name
+                HAVING COUNT(s.id) > 0
+                ORDER BY avg_age ASC
+                LIMIT %s
+            """
             cursor.execute(query, (limit,))
             results = cursor.fetchall()
             logger.info(f"Retrieved top {limit} rooms by average age")
@@ -338,17 +309,17 @@ class StudentRoomAnalytics(StudentRoomAnalyticsInterface):
         cursor = connection.cursor(dictionary=True)
         try:
             query = """
-                    SELECT r.id, \
-                           r.name,
-                           (MAX(DATEDIFF(CURDATE(), s.birthday) / 365.25) -
-                            MIN(DATEDIFF(CURDATE(), s.birthday) / 365.25)) as age_difference
-                    FROM rooms r
-                             INNER JOIN students s ON r.id = s.room
-                    GROUP BY r.id, r.name
-                    HAVING COUNT(s.id) > 1
-                    ORDER BY age_difference DESC
-                        LIMIT %s \
-                    """
+                SELECT r.id,
+                       r.name,
+                       (MAX(DATEDIFF(CURDATE(), s.birthday) / 365.25) -
+                        MIN(DATEDIFF(CURDATE(), s.birthday) / 365.25)) AS age_difference
+                FROM rooms r
+                INNER JOIN students s ON r.id = s.room
+                GROUP BY r.id, r.name
+                HAVING COUNT(s.id) > 1
+                ORDER BY age_difference DESC
+                LIMIT %s
+            """
             cursor.execute(query, (limit,))
             results = cursor.fetchall()
             logger.info(f"Retrieved top {limit} rooms by age difference")
@@ -363,16 +334,18 @@ class StudentRoomAnalytics(StudentRoomAnalyticsInterface):
         cursor = connection.cursor(dictionary=True)
         try:
             query = """
-                    SELECT r.id, r.name
-                    FROM rooms r
-                    WHERE EXISTS (SELECT 1 \
-                                  FROM students s1 \
-                                  WHERE s1.room = r.id AND s1.sex = 'M') \
-                      AND EXISTS (SELECT 1 \
-                                  FROM students s2 \
-                                  WHERE s2.room = r.id AND s2.sex = 'F')
-                    ORDER BY r.id \
-                    """
+                SELECT r.id, r.name
+                FROM rooms r
+                WHERE EXISTS (
+                    SELECT 1 FROM students s1
+                    WHERE s1.room = r.id AND s1.sex = 'M'
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM students s2
+                    WHERE s2.room = r.id AND s2.sex = 'F'
+                )
+                ORDER BY r.id
+            """
             cursor.execute(query)
             results = cursor.fetchall()
             logger.info(f"Retrieved {len(results)} mixed gender rooms")
@@ -384,36 +357,75 @@ class StudentRoomAnalytics(StudentRoomAnalyticsInterface):
             cursor.close()
 
 
+class StudentJSONLoader(BaseJSONLoader):
+    def load(self, file_path: Path) -> List[Student]:
+        try:
+            raw_items = self.prepare_data(file_path)
+            students = [
+                Student(
+                    id=item['id'],
+                    name=item['name'],
+                    birthday=item['birthday'],
+                    room=item['room'],
+                    sex=item['sex']
+                )
+                for item in raw_items
+            ]
+            logger.info(f"Loaded {len(students)} students from {file_path}")
+            return students
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            logger.exception(f"Failed to load students from {file_path}")
+            raise
+
+
+class RoomJSONLoader(BaseJSONLoader):
+    def load(self, file_path: Path) -> List[Room]:
+        try:
+            raw_items = self.prepare_data(file_path)
+            rooms = [
+                Room(id=item['id'], name=item['name'])
+                for item in raw_items
+            ]
+            logger.info(f"Loaded {len(rooms)} rooms from {file_path}")
+            return rooms
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            logger.exception(f"Failed to load rooms from {file_path}")
+            raise
+
+
 class StudentRoomAnalyticsApplication:
     def __init__(
-            self,
-            database_connection: DatabaseConnectionInterface,
-            data_loader: DataLoaderInterface,
-            schema_manager: DatabaseSchemaManagerInterface,
-            data_inserter: DataInserterInterface,
-            analytics: StudentRoomAnalyticsInterface
+        self,
+        database_connection: DatabaseConnectionInterface,
+        schema_manager: DatabaseSchemaManagerInterface,
+        data_inserter: DataInserterInterface,
+        analytics: StudentRoomAnalyticsInterface,
+        student_loader: BaseJSONLoader,
+        room_loader: BaseJSONLoader,
     ):
         self.database_connection = database_connection
-        self.data_loader = data_loader
         self.schema_manager = schema_manager
         self.data_inserter = data_inserter
         self.analytics = analytics
+        self.student_loader = student_loader
+        self.room_loader = room_loader
 
     def run_analytics(self, students_file_path: Path, rooms_file_path: Path) -> None:
         connection = None
         try:
-            students = self.data_loader.load_students(students_file_path)
-            rooms = self.data_loader.load_rooms(rooms_file_path)
+            rooms = self.room_loader.load(rooms_file_path)
+            students = self.student_loader.load(students_file_path)
 
             connection = self.database_connection.connect()
-
             self.schema_manager.create_schema(connection)
+            if hasattr(self.schema_manager, "clear_tables"):
+                self.schema_manager.clear_tables(connection)
+
             self.data_inserter.insert_rooms(connection, rooms)
             self.data_inserter.insert_students(connection, students)
 
             self._print_analytics_results(connection)
-
-        except Exception as error:
+        except Exception:
             logger.exception("Application execution failed")
             raise
         finally:
@@ -444,32 +456,32 @@ class StudentRoomAnalyticsApplication:
 
 
 def main():
-    database_config = {
-        'host': 'localhost',
-        'user': 'student_user',
-        'password': 'student_password',
-        'database': 'student_analytics'
-    }
+    database_connection = MySQLDatabaseConnection(
+        host=settings.db_host,
+        user=settings.db_user,
+        password=settings.db_password,
+        database=settings.db_name
+    )
 
-    database_connection = MySQLDatabaseConnection(**database_config)
-    data_loader = JSONDataLoader()
     schema_manager = MySQLSchemaManager()
     data_inserter = MySQLDataInserter()
     analytics = StudentRoomAnalytics()
+    student_loader = StudentJSONLoader()
+    room_loader = RoomJSONLoader()
 
     app = StudentRoomAnalyticsApplication(
-        database_connection,
-        data_loader,
-        schema_manager,
-        data_inserter,
-        analytics
+        database_connection=database_connection,
+        schema_manager=schema_manager,
+        data_inserter=data_inserter,
+        analytics=analytics,
+        student_loader=student_loader,
+        room_loader=room_loader,
+
     )
 
-    students_file = Path('students.json')
-    rooms_file = Path('rooms.json')
-
+    students_file = Path('data/students.json')
+    rooms_file = Path('data/rooms.json')
     app.run_analytics(students_file, rooms_file)
-
 
 if __name__ == "__main__":
     main()
