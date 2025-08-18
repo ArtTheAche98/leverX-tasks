@@ -1,0 +1,16 @@
+Django
+djangorestframework
+django-filter
+drf-spectacular
+djangorestframework-simplejwt
+django-simple-history
+pillow
+python-magic
+pytest
+pytest-django
+model-bakery
+black
+isort
+flake8
+mypy
+drf-nested-routers
