@@ -1,76 +1,127 @@
-from rest_framework import viewsets, mixins, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
-
+from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from django.contrib.auth import get_user_model
+
+from rest_framework import status, mixins, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.exceptions import PermissionDenied
+
 from drf_spectacular.utils import (
-    extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse
+    extend_schema,
+    extend_schema_view,
+    OpenApiResponse,
+    OpenApiParameter,
 )
 
-from CourseManagementApp.courses.models import Course, CourseMembership
-from CourseManagementApp.learning.models import Lecture, Homework, Submission, Grade, GradeComment
+from CourseManagementApp.courses.models import Course, CourseMembership, CourseWaitlistEntry
+from CourseManagementApp.learning.models import (
+    Lecture,
+    Homework,
+    Submission,
+    Grade,
+    GradeComment,
+)
 from CourseManagementApp.core.choices import MemberRole
 from CourseManagementApp.domain.services import course_service, learning_service
 from CourseManagementApp.core.permissions import (
-    IsCourseOwner, IsCourseTeacher, IsSubmissionParticipant,
-    IsGradeParticipant, IsGradeCommentParticipant
+    IsCourseTeacher,
+    IsCourseTeacherOrOwner,
+    IsSubmissionParticipant,
+    IsGradeParticipant,
+    IsGradeCommentParticipant,
+    IsSubmissionAccess, IsSubmissionOwner
 )
 from CourseManagementApp.api.serializers import (
-    RegistrationSerializer, UserSerializer,
-    CourseWriteSerializer, CourseReadSerializer, MembershipWriteSerializer,
-    LectureWriteSerializer, LectureReadSerializer,
-    HomeworkWriteSerializer, HomeworkReadSerializer,
-    SubmissionWriteSerializer, SubmissionReadSerializer,
-    GradeWriteSerializer, GradeReadSerializer,
-    GradeCommentWriteSerializer, GradeCommentReadSerializer,
+    RegistrationSerializer,
+    UserSerializer,
+    CourseWriteSerializer,
+    CourseReadSerializer,
+    MembershipWriteSerializer,
+    LectureWriteSerializer,
+    LectureReadSerializer,
+    HomeworkWriteSerializer,
+    HomeworkReadSerializer,
+    SubmissionWriteSerializer,
+    SubmissionReadSerializer,
+    GradeWriteSerializer,
+    GradeReadSerializer,
+    GradeCommentWriteSerializer,
+    GradeCommentReadSerializer,
+    CourseWaitlistEntrySerializer,
 )
+
+from CourseManagementApp.api.throttles import SubmissionRateThrottle
 
 User = get_user_model()
 
+# ---------- Auth ----------
+@extend_schema(
+    tags=["Auth"],
+    request=RegistrationSerializer,
+    responses={201: UserSerializer, 400: OpenApiResponse(description="Validation error")},
+    description="Register a new user. Teacher role requires staff privileges."
+)
+class RegistrationView(APIView):
+    permission_classes = [AllowAny]
 
+    def post(self, request):
+        ser = RegistrationSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        user = ser.save()
+        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+
+
+# ---------- Courses ----------
 @extend_schema_view(
     list=extend_schema(tags=["Courses"]),
     retrieve=extend_schema(tags=["Courses"]),
-    create=extend_schema(tags=["Courses"], responses={201: OpenApiResponse(response=CourseReadSerializer)}),
-    update=extend_schema(tags=["Courses"]),
-    partial_update=extend_schema(tags=["Courses"]),
+    create=extend_schema(tags=["Courses"], request=CourseWriteSerializer, responses={201: CourseReadSerializer}),
+    update=extend_schema(tags=["Courses"], request=CourseWriteSerializer),
+    partial_update=extend_schema(tags=["Courses"], request=CourseWriteSerializer),
     destroy=extend_schema(tags=["Courses"], responses={204: OpenApiResponse(description="Deleted")}),
-    course_lectures=extend_schema(
-        tags=["Lectures"],
-        parameters=[OpenApiParameter("pk", int, OpenApiParameter.PATH)],
-        responses={200: LectureReadSerializer(many=True)}
+    add_teacher=extend_schema(
+        tags=["Membership"],
+        request=MembershipWriteSerializer,
+        responses={200: UserSerializer, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not Found")},
     ),
-    teachers=extend_schema(tags=["Courses"], responses={204: OpenApiResponse(description="Added")}),
-    students=extend_schema(tags=["Courses"], responses={204: OpenApiResponse(description="Added")}),
+    add_student=extend_schema(
+        tags=["Membership"],
+        request=MembershipWriteSerializer,
+        responses={200: UserSerializer, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not Found")},
+    ),
+    remove_member=extend_schema(
+        tags=["Membership"],
+        parameters=[OpenApiParameter("user_id", int, OpenApiParameter.PATH)],
+        responses={204: OpenApiResponse(description="Removed"), 403: OpenApiResponse(description="Forbidden")},
+    ),
+    members=extend_schema(
+        tags=["Membership"],
+        responses={200: UserSerializer(many=True)},
+    ),
 )
 class CourseViewSet(viewsets.ModelViewSet):
-    queryset = Course.objects.select_related("owner")
-
-    def get_permissions(self):
-        if self.action in ("update", "partial_update", "destroy"):
-            return [IsCourseOwner()]
-        if self.action in ("teachers", "students", "remove_teacher", "remove_student"):
-            return [IsCourseTeacher()]
-        return [IsAuthenticated()]
-
-    def get_queryset(self):
-        return Course.objects.visible_to(self.request.user).select_related("owner")
+    queryset = Course.objects.all().select_related("owner")
+    permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         return CourseWriteSerializer if self.action in ("create", "update", "partial_update") else CourseReadSerializer
 
-    def perform_create(self, serializer):
-        self._created_course = course_service.create_course(self.request.user, serializer.validated_data)
+    def get_permissions(self):
+        if self.action in ("create",):
+            return [IsAuthenticated()]
+        if self.action in ("update", "partial_update", "destroy", "add_teacher", "add_student", "remove_member"):
+            return [IsAuthenticated(), IsCourseTeacherOrOwner()]
+        return super().get_permissions()
 
-    def create(self, request, *args, **kwargs):
-        ser = self.get_serializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        self.perform_create(ser)
-        return Response(CourseReadSerializer(self._created_course).data, status=status.HTTP_201_CREATED)
+    def get_queryset(self):
+        return Course.objects.visible_to(self.request.user).select_related("owner")
+
+    def perform_create(self, serializer):
+        course = course_service.create_course(self.request.user, serializer.validated_data)
+        serializer.instance = course
 
     def update(self, request, *args, **kwargs):
         course = self.get_object()
@@ -84,55 +135,65 @@ class CourseViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Only owner can delete"}, status=403)
         return super().destroy(request, *args, **kwargs)
 
-    def _require_teacher(self, request, course):
-        if not CourseMembership.objects.filter(course=course, user=request.user, role=MemberRole.TEACHER).exists():
-            return Response({"detail": "Teacher role required"}, status=403)
-
-    @action(detail=True, methods=["post"])
-    def teachers(self, request, pk=None):
+    @action(detail=True, methods=["get"], url_path="members")
+    def members(self, request, pk=None):
         course = self.get_object()
-        resp = self._require_teacher(request, course)
-        if resp: return resp
+        users = User.objects.filter(course_memberships__course=course).distinct()
+        page = self.paginate_queryset(users)
+        ser = UserSerializer(page or users, many=True)
+        if page is not None:
+            return self.get_paginated_response(ser.data)
+        return Response(ser.data)
+
+    @action(detail=True, methods=["post"], url_path="members/add-teacher")
+    def add_teacher(self, request, pk=None):
+        course = self.get_object()
         ser = MembershipWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        if ser.validated_data["role"] != MemberRole.TEACHER:
-            return Response({"detail": "role must be TEACHER"}, status=400)
-        user = get_object_or_404(User, id=ser.validated_data["user_id"])
-        course_service.add_teacher(request.user, course, user)
-        return Response(status=204)
+        user = get_object_or_404(User, pk=ser.validated_data["user_id"])
+        membership = course_service.add_teacher(request.user, course, user)
+        return Response(UserSerializer(membership.user).data)
 
-    @teachers.mapping.delete
-    def remove_teacher(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="members/add-student")
+    def add_student(self, request, pk=None):
         course = self.get_object()
-        resp = self._require_teacher(request, course)
-        if resp: return resp
-        user_id = request.query_params.get("user_id")
-        user = get_object_or_404(User, id=user_id)
+        ser = MembershipWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = get_object_or_404(User, pk=ser.validated_data["user_id"])
+        membership = course_service.add_student(request.user, course, user)
+        return Response(UserSerializer(membership.user).data)
+
+    @action(detail=True, methods=["delete"], url_path=r"members/(?P<user_id>\d+)")
+    def remove_member(self, request, pk=None, user_id=None):
+        course = self.get_object()
+        user = get_object_or_404(User, pk=user_id)
         course_service.remove_member(request.user, course, user)
         return Response(status=204)
 
-    @action(detail=True, methods=["post"])
-    def students(self, request, pk=None):
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def request_join(self, request, pk=None):
         course = self.get_object()
-        resp = self._require_teacher(request, course)
-        if resp: return resp
-        ser = MembershipWriteSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        if ser.validated_data["role"] != MemberRole.STUDENT:
-            return Response({"detail": "role must be STUDENT"}, status=400)
-        user = get_object_or_404(User, id=ser.validated_data["user_id"])
-        course_service.add_student(request.user, course, user)
-        return Response(status=204)
+        entry, created = CourseWaitlistEntry.objects.get_or_create(course=course, student=request.user)
+        if not created:
+            return Response({"detail": "Already requested."}, status=400)
+        return Response(CourseWaitlistEntrySerializer(entry).data, status=201)
 
-    @students.mapping.delete
-    def remove_student(self, request, pk=None):
+    @action(detail=True, methods=['get'], permission_classes=[IsCourseTeacherOrOwner])
+    def waitlist(self, request, pk=None):
         course = self.get_object()
-        resp = self._require_teacher(request, course)
-        if resp: return resp
-        user_id = request.query_params.get("user_id")
-        user = get_object_or_404(User, id=user_id)
-        course_service.remove_member(request.user, course, user)
-        return Response(status=204)
+        entries = course.waitlist.filter(approved=None)
+        ser = CourseWaitlistEntrySerializer(entries, many=True)
+        return Response(ser.data)
+
+    @action(detail=True, methods=['patch'], url_path='waitlist/(?P<entry_id>\\d+)/approve',
+            permission_classes=[IsCourseTeacherOrOwner])
+    def approve_waitlist(self, request, pk=None, entry_id=None):
+        entry = get_object_or_404(CourseWaitlistEntry, id=entry_id, course=pk)
+        entry.approved = True  # or False for reject
+        entry.save()
+        if entry.approved:
+            course_service.add_student(request.user, entry.course, entry.student)
+        return Response(CourseWaitlistEntrySerializer(entry).data)
 
     @action(detail=True, methods=["get"], url_path="lectures")
     def course_lectures(self, request, pk=None):
@@ -146,7 +207,7 @@ class CourseViewSet(viewsets.ModelViewSet):
             return self.get_paginated_response(ser.data)
         return Response(ser.data)
 
-
+# ---------- Lectures ----------
 @extend_schema_view(
     list=extend_schema(tags=["Lectures"]),
     retrieve=extend_schema(tags=["Lectures"]),
@@ -155,7 +216,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     partial_update=extend_schema(tags=["Lectures"], request=LectureWriteSerializer),
     destroy=extend_schema(tags=["Lectures"], responses={204: OpenApiResponse(description="Deleted")}),
     lecture_homework=extend_schema(
-        tags=["Homework"], responses={200: HomeworkReadSerializer(many=True)}
+        tags=["Homework"], responses={200: HomeworkReadSerializer(many=True)},
     ),
 )
 class LectureViewSet(viewsets.ModelViewSet):
@@ -163,7 +224,7 @@ class LectureViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [IsAuthenticated(), IsCourseTeacher()]
+            return [IsAuthenticated(), IsCourseTeacherOrOwner()]
         return [IsAuthenticated()]
 
     def get_serializer_class(self):
@@ -183,6 +244,7 @@ class LectureViewSet(viewsets.ModelViewSet):
             course=course,
             topic=serializer.validated_data["topic"],
             presentation=serializer.validated_data.get("presentation"),
+            presentation_url=serializer.validated_data.get("presentation_url"),
             is_published=serializer.validated_data.get("is_published", False),
         )
 
@@ -194,14 +256,12 @@ class LectureViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         lecture = self.get_object()
-        if not CourseMembership.objects.filter(course=lecture.course, user=self.request.user,
-                                               role=MemberRole.TEACHER).exists():
+        if not CourseMembership.objects.filter(course=lecture.course, user=self.request.user, role=MemberRole.TEACHER).exists():
             raise PermissionDenied("Only teachers can modify lectures")
         serializer.save()
 
     def perform_destroy(self, instance):
-        if not CourseMembership.objects.filter(course=instance.course, user=self.request.user,
-                                               role=MemberRole.TEACHER).exists():
+        if not CourseMembership.objects.filter(course=instance.course, user=self.request.user, role=MemberRole.TEACHER).exists():
             raise PermissionDenied("Only teachers can delete lectures")
         super().perform_destroy(instance)
 
@@ -217,7 +277,7 @@ class LectureViewSet(viewsets.ModelViewSet):
             return self.get_paginated_response(ser.data)
         return Response(ser.data)
 
-
+# ---------- Homework ----------
 @extend_schema_view(
     list=extend_schema(tags=["Homework"]),
     retrieve=extend_schema(tags=["Homework"]),
@@ -226,7 +286,7 @@ class LectureViewSet(viewsets.ModelViewSet):
     partial_update=extend_schema(tags=["Homework"], request=HomeworkWriteSerializer),
     destroy=extend_schema(tags=["Homework"], responses={204: OpenApiResponse(description="Deleted")}),
     homework_submissions=extend_schema(
-        tags=["Submissions"], responses={200: SubmissionReadSerializer(many=True)}
+        tags=["Submissions"], responses={200: SubmissionReadSerializer(many=True)},
     ),
 )
 class HomeworkViewSet(viewsets.ModelViewSet):
@@ -234,7 +294,7 @@ class HomeworkViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [IsAuthenticated(), IsCourseTeacher()]
+            return [IsAuthenticated(), IsCourseTeacherOrOwner()]
         return [IsAuthenticated()]
 
     def get_serializer_class(self):
@@ -258,138 +318,124 @@ class HomeworkViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
-        ser = self.get_serializer(data=request.body and request.data)
+        ser = self.get_serializer(data=request.data)
         ser.is_valid(raise_exception=True)
         self.perform_create(ser)
         return Response(HomeworkReadSerializer(self._created_homework).data, status=status.HTTP_201_CREATED)
 
     def perform_update(self, serializer):
         hw = self.get_object()
-        if not CourseMembership.objects.filter(course=hw.lecture.course, user=self.request.user,
-                                               role=MemberRole.TEACHER).exists():
+        if not CourseMembership.objects.filter(course=hw.lecture.course, user=self.request.user, role=MemberRole.TEACHER).exists():
             raise PermissionDenied("Only teachers can modify homework")
         serializer.save()
 
     def perform_destroy(self, instance):
-        if not CourseMembership.objects.filter(course=instance.lecture.course, user=self.request.user,
-                                               role=MemberRole.TEACHER).exists():
+        if not CourseMembership.objects.filter(course=instance.lecture.course, user=self.request.user, role=MemberRole.TEACHER).exists():
             raise PermissionDenied("Only teachers can delete homework")
         super().perform_destroy(instance)
 
-    @action(detail=True, methods=["get"], url_path="submissions")
-    def homework_submissions(self, request, pk=None):
-        hw = self.get_object()
-        is_teacher = CourseMembership.objects.filter(
-            course=hw.lecture.course, user=request.user, role=MemberRole.TEACHER
-        ).exists()
-        if not is_teacher and hw.lecture.course.owner_id != request.user.id:
-            return Response({"detail": "Forbidden"}, status=403)
-        qs = hw.submissions.select_related("student", "grade")
-        page = self.paginate_queryset(qs)
-        ser = SubmissionReadSerializer(page or qs, many=True)
-        if page is not None:
-            return self.get_paginated_response(ser.data)
-        return Response(ser.data)
-
-
+# ---------- Submissions ----------
 @extend_schema_view(
+    list=extend_schema(tags=["Submissions"], responses={200: SubmissionReadSerializer(many=True)}),
     retrieve=extend_schema(tags=["Submissions"]),
-    create=extend_schema(
-        tags=["Submissions"],
-        request=SubmissionWriteSerializer,
-        responses={201: SubmissionReadSerializer, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")}
-    ),
-    partial_update=extend_schema(
-        tags=["Submissions"],
-        request=SubmissionWriteSerializer,
-        responses={200: SubmissionReadSerializer}
-    ),
-    destroy=extend_schema(tags=["Submissions"], responses={204: OpenApiResponse(description="Deleted")}),
+    create=extend_schema(tags=["Submissions"], request=SubmissionWriteSerializer, responses={201: SubmissionReadSerializer}),
+    partial_update=extend_schema(tags=["Submissions"], request=SubmissionWriteSerializer, responses={200: SubmissionReadSerializer}),
     mine=extend_schema(tags=["Submissions"], responses={200: SubmissionReadSerializer(many=True)}),
     grade=extend_schema(
         tags=["Grades"],
         request=GradeWriteSerializer,
-        responses={201: GradeReadSerializer, 403: OpenApiResponse(description="Forbidden")}
-    ),
-    homework_submissions=extend_schema(
-        tags=["Submissions"],
-        parameters=[OpenApiParameter("homework_id", int, OpenApiParameter.PATH)],
-        responses={200: SubmissionReadSerializer(many=True), 403: OpenApiResponse(description="Forbidden")}
+        responses={201: GradeReadSerializer, 403: OpenApiResponse(description="Forbidden")},
     ),
 )
-class SubmissionViewSet(viewsets.GenericViewSet,
-                        mixins.CreateModelMixin,
-                        mixins.RetrieveModelMixin,
-                        mixins.DestroyModelMixin):
-    queryset = Submission.objects.select_related("homework__lecture__course", "student", "grade")
+class SubmissionViewSet(
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.ListModelMixin,
+    viewsets.GenericViewSet
+):
+    permission_classes = [IsAuthenticated, IsSubmissionAccess]
+    throttle_classes = []
 
-    def get_permissions(self):
-        if self.action in ("create", "mine", "homework_submissions", "grade"):
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsSubmissionParticipant()]
+    def get_throttles(self):
+        if self.action == "create":
+            self.throttle_classes = [SubmissionRateThrottle]
+        return super().get_throttles()
+
+    @extend_schema(
+        description="Create a submission (rate limited: 10/hour per user).",
+        request=SubmissionWriteSerializer,
+        responses={201: SubmissionReadSerializer, 400: OpenApiResponse(description="Validation error")},
+    )
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    queryset = Submission.objects.select_related("homework__lecture__course", "student", "grade")
 
     def get_serializer_class(self):
         return SubmissionWriteSerializer if self.action in ("create", "partial_update") else SubmissionReadSerializer
 
-    def create(self, request, *args, **kwargs):
-        ser = SubmissionWriteSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        homework_id = request.data.get("homework")
-        hw = get_object_or_404(Homework.objects.select_related("lecture__course"), id=homework_id)
-        submission = learning_service.submit(
-            student=request.user,
-            homework=hw,
-            content_text=ser.validated_data.get("content_text", ""),
-            attachment=ser.validated_data.get("attachment"),
-        )
-        return Response(SubmissionReadSerializer(submission).data, status=201)
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        homework_id = self.kwargs.get("homework_pk")
+        if homework_id:
+            qs = qs.filter(homework_id=homework_id)
+            is_teacher = CourseMembership.objects.filter(
+                course__lectures__homeworks__id=homework_id,
+                user=user,
+                role=MemberRole.TEACHER
+            ).exists()
+            if not is_teacher:
+                qs = qs.filter(student=user)
+            return qs
+        return qs.none()
 
-    def partial_update(self, request, pk=None):
+    def perform_create(self, serializer):
+        homework = get_object_or_404(Homework.objects.select_related("lecture__course"), pk=self.kwargs.get("homework_pk"))
+        submission = learning_service.submit(
+            self.request.user,
+            homework,
+            content_text=serializer.validated_data.get("content_text", ""),
+            attachment=serializer.validated_data.get("attachment"),
+        )
+        serializer.instance = submission
+
+    def partial_update(self, request, *args, **kwargs):
         submission = self.get_object()
         ser = SubmissionWriteSerializer(data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
-        # Resubmit
         updated = learning_service.submit(
-            student=request.user,
-            homework=submission.homework,
+            request.user,
+            submission.homework,
             content_text=ser.validated_data.get("content_text", submission.content_text),
             attachment=ser.validated_data.get("attachment", submission.attachment),
         )
         return Response(SubmissionReadSerializer(updated).data)
 
     @action(detail=False, methods=["get"])
-    def mine(self, request):
-        qs = Submission.objects.for_student(request.user).select_related("homework__lecture__course", "grade", "student")
+    def mine(self, request, *args, **kwargs):
+        qs = Submission.objects.filter(student=request.user).select_related(
+            "homework__lecture__course", "grade", "student"
+        )
         page = self.paginate_queryset(qs)
         ser = SubmissionReadSerializer(page or qs, many=True)
         if page is not None:
             return self.get_paginated_response(ser.data)
         return Response(ser.data)
 
-    @action(detail=True, methods=["post"], url_path="grade")
-    def grade(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="grade", permission_classes=[IsAuthenticated, IsCourseTeacher])
+    def grade(self, request, pk=None, *args, **kwargs):
         submission = self.get_object()
-        value = int(request.data.get("value", -1))
-        comment = request.data.get("comment", "")
+        ser = GradeWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        value = ser.validated_data["value"]
+        comment = ser.validated_data.get("comment", "")
         grade = learning_service.grade_submission(request.user, submission, value, comment)
-        return Response(GradeReadSerializer(grade).data, status=201)
-
-    @action(detail=False, methods=["get"], url_path=r"homework/(?P<homework_id>\d+)/submissions")
-    def homework_submissions(self, request, homework_id=None):
-        hw = get_object_or_404(Homework.objects.select_related("lecture__course"), id=homework_id)
-        is_teacher = CourseMembership.objects.filter(
-            course=hw.lecture.course, user=request.user, role=MemberRole.TEACHER
-        ).exists()
-        if not is_teacher and hw.lecture.course.owner_id != request.user.id:
-            return Response({"detail": "Forbidden"}, status=403)
-        qs = Submission.objects.filter(homework=hw).select_related("grade", "student")
-        page = self.paginate_queryset(qs)
-        ser = SubmissionReadSerializer(page or qs, many=True)
-        if page is not None:
-            return self.get_paginated_response(ser.data)
-        return Response(ser.data)
+        return Response(GradeReadSerializer(grade).data, status=status.HTTP_201_CREATED)
 
 
+# ---------- Grades ----------
 @extend_schema_view(
     retrieve=extend_schema(tags=["Grades"]),
     update=extend_schema(tags=["Grades"], request=GradeWriteSerializer, responses={200: GradeReadSerializer}),
@@ -398,12 +444,10 @@ class SubmissionViewSet(viewsets.GenericViewSet,
     by_submission=extend_schema(
         tags=["Grades"],
         parameters=[OpenApiParameter("submission_id", int, OpenApiParameter.PATH)],
-        responses={200: GradeReadSerializer, 404: OpenApiResponse(description="No grade")}
+        responses={200: GradeReadSerializer, 404: OpenApiResponse(description="No grade")},
     ),
 )
-class GradeViewSet(viewsets.GenericViewSet,
-                   mixins.RetrieveModelMixin,
-                   mixins.UpdateModelMixin):
+class GradeViewSet(viewsets.GenericViewSet, mixins.RetrieveModelMixin, mixins.UpdateModelMixin):
     queryset = Grade.objects.select_related(
         "submission__homework__lecture__course", "graded_by", "submission__student"
     )
@@ -439,21 +483,20 @@ class GradeViewSet(viewsets.GenericViewSet,
         grade = getattr(submission, "grade", None)
         if not grade:
             return Response({"detail": "No grade"}, status=404)
-        # Object permission already enforced on retrieve; explicit check for student/teacher:
         if submission.student_id != request.user.id and not CourseMembership.objects.filter(
             course=submission.homework.lecture.course, user=request.user, role=MemberRole.TEACHER
         ).exists():
             return Response({"detail": "Forbidden"}, status=403)
         return Response(GradeReadSerializer(grade).data)
 
-
+# ---------- Grade Comments ----------
 @extend_schema_view(
     list=extend_schema(tags=["GradeComments"]),
     retrieve=extend_schema(tags=["GradeComments"]),
     create=extend_schema(
         tags=["GradeComments"],
         request=GradeCommentWriteSerializer,
-        responses={201: GradeCommentReadSerializer, 403: OpenApiResponse(description="Forbidden")}
+        responses={201: GradeCommentReadSerializer, 403: OpenApiResponse(description="Forbidden")},
     ),
     update=extend_schema(tags=["GradeComments"], request=GradeCommentWriteSerializer),
     partial_update=extend_schema(tags=["GradeComments"], request=GradeCommentWriteSerializer),
@@ -463,7 +506,7 @@ class GradeCommentViewSet(viewsets.ModelViewSet):
     queryset = GradeComment.objects.select_related(
         "grade__submission__homework__lecture__course", "author", "grade__submission__student"
     )
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsGradeCommentParticipant]
 
     def get_serializer_class(self):
         return GradeCommentWriteSerializer if self.action in ("create", "update", "partial_update") else GradeCommentReadSerializer
@@ -474,7 +517,6 @@ class GradeCommentViewSet(viewsets.ModelViewSet):
         grade_id = self.request.query_params.get("grade")
         if grade_id:
             qs = qs.filter(grade_id=grade_id)
-        # Allow: author, course teacher, or submission student
         return qs.filter(
             Q(author=user) |
             Q(grade__submission__student=user) |
@@ -486,12 +528,9 @@ class GradeCommentViewSet(viewsets.ModelViewSet):
         grade = serializer.validated_data["grade"]
         submission = grade.submission
         course = submission.homework.lecture.course
-        is_teacher = CourseMembership.objects.filter(
-            course=course, user=self.request.user, role=MemberRole.TEACHER
-        ).exists()
-        is_student_owner = submission.student_id == self.request.user.id
-        if not (is_teacher or is_student_owner):
-            raise PermissionDenied("Not allowed to comment")
+        is_teacher = CourseMembership.objects.filter(course=course, user=self.request.user, role=MemberRole.TEACHER).exists()
+        if not (is_teacher or submission.student_id == self.request.user.id):
+            raise PermissionDenied("Forbidden")
         serializer.save(author=self.request.user)
 
     def destroy(self, request, *args, **kwargs):

@@ -102,6 +102,42 @@ class IsSubmissionParticipant(BasePermission):
         ).exists()
 
 
+class IsSubmissionAccess(BasePermission):
+    """
+    Permission for submission endpoints:
+      - has_permission: user must be enrolled (student or teacher) in the submission's course
+        when homework_pk is present (nested route). Otherwise deny.
+      - has_object_permission: allow if student owner or a teacher of the course.
+    """
+    def _course_from_homework(self, homework_id):
+        from CourseManagementApp.learning.models import Homework
+        try:
+            hw = Homework.objects.select_related("lecture__course").get(pk=homework_id)
+        except Homework.DoesNotExist:
+            return None
+        return hw.lecture.course
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        hw_id = view.kwargs.get("homework_pk")
+        if not hw_id:
+            # Non‑nested (should not occur with current routing); fallback to auth check.
+            return True
+        course = self._course_from_homework(hw_id)
+        if not course:
+            return False
+        return CourseMembership.objects.filter(course=course, user=request.user).exists()
+
+    def has_object_permission(self, request, view, obj):
+        course = obj.homework.lecture.course
+        if obj.student_id == request.user.id:
+            return True
+        return CourseMembership.objects.filter(
+            course=course, user=request.user, role=MemberRole.TEACHER
+        ).exists()
+
+
 class IsGradeCommentParticipant(BasePermission):
     """
     Allows access (retrieve/destroy) if user is the comment author or a teacher of the course.
