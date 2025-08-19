@@ -175,7 +175,7 @@ class CourseViewSet(viewsets.ModelViewSet):
         course = self.get_object()
         entry, created = CourseWaitlistEntry.objects.get_or_create(course=course, student=request.user)
         if not created:
-            return Response({"detail": "Already requested."}, status=400)
+            return Response({"detail": "Already requested."}, status=409)
         return Response(CourseWaitlistEntrySerializer(entry).data, status=201)
 
     @action(detail=True, methods=['get'], permission_classes=[IsCourseTeacherOrOwner])
@@ -189,18 +189,25 @@ class CourseViewSet(viewsets.ModelViewSet):
             permission_classes=[IsCourseTeacherOrOwner])
     def approve_waitlist(self, request, pk=None, entry_id=None):
         entry = get_object_or_404(CourseWaitlistEntry, id=entry_id, course=pk)
-        entry.approved = True  # or False for reject
-        entry.save()
+        entry.approved = True
+        entry.save(update_fields=["approved"])
         if entry.approved:
-            course_service.add_student(request.user, entry.course, entry.student)
+            course = entry.course
+            course_service.add_student(course.owner, course, entry.student)
         return Response(CourseWaitlistEntrySerializer(entry).data)
 
     @action(detail=True, methods=["get"], url_path="lectures")
     def course_lectures(self, request, pk=None):
         course = self.get_object()
         qs = Lecture.objects.filter(course=course)
-        if not CourseMembership.objects.filter(course=course, user=request.user).exists() and course.owner_id != request.user.id:
-            qs = qs.filter(is_published=True, course__is_published=True, course__is_public=True)
+        is_member = CourseMembership.objects.filter(course=course, user=request.user).exists()
+        if not is_member and course.owner_id != request.user.id:
+            qs = qs.filter(
+                is_published=True,
+                course__is_published=True
+            )
+            if not course.is_public:
+                qs = qs.none()
         page = self.paginate_queryset(qs)
         ser = LectureReadSerializer(page or qs, many=True)
         if page is not None:
@@ -269,13 +276,20 @@ class LectureViewSet(viewsets.ModelViewSet):
     def lecture_homework(self, request, pk=None):
         lecture = self.get_object()
         qs = lecture.homeworks.all()
-        if not CourseMembership.objects.filter(course=lecture.course, user=request.user).exists() and lecture.course.owner_id != request.user.id:
-            qs = qs.none()
+        is_member = CourseMembership.objects.filter(course=lecture.course, user=request.user).exists()
+        if not is_member and lecture.course.owner_id != request.user.id:
+            qs = qs.filter(
+                is_active=True,
+                lecture__is_published=True,
+                lecture__course__is_published=True,
+                lecture__course__is_public=True,
+            )
         page = self.paginate_queryset(qs)
         ser = HomeworkReadSerializer(page or qs, many=True)
         if page is not None:
             return self.get_paginated_response(ser.data)
         return Response(ser.data)
+
 
 # ---------- Homework ----------
 @extend_schema_view(
@@ -333,6 +347,7 @@ class HomeworkViewSet(viewsets.ModelViewSet):
         if not CourseMembership.objects.filter(course=instance.lecture.course, user=self.request.user, role=MemberRole.TEACHER).exists():
             raise PermissionDenied("Only teachers can delete homework")
         super().perform_destroy(instance)
+
 
 # ---------- Submissions ----------
 @extend_schema_view(
