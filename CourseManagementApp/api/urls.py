@@ -10,6 +10,7 @@ from CourseManagementApp.api.views import (
     SubmissionViewSet,
     GradeViewSet,
     GradeCommentViewSet,
+    RegistrationView,
 )
 
 router = routers.SimpleRouter()
@@ -30,6 +31,7 @@ urlpatterns = [
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
     path("docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="docs"),
     path("auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("auth/register/", RegistrationView.as_view(), name="auth-register"),
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("", include(router.urls)),
     path("", include(courses_router.urls)),
