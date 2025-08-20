@@ -1,32 +1,27 @@
+"""Custom DRF permission classes for course, submission, grade, and comment access control."""
+
+from rest_framework.request import Request
+from typing import Any
+
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 from django.shortcuts import get_object_or_404
 
 from CourseManagementApp.courses.models import Course, CourseMembership
 from CourseManagementApp.learning.models import Lecture, Homework
 from CourseManagementApp.core.choices import MemberRole
-
-class IsCourseOwner(BasePermission):
-    def has_object_permission(self, request, view, obj):
-        course = obj if isinstance(obj, Course) else getattr(obj, "course", None)
-        if course is None and hasattr(obj, "lecture"):
-            course = obj.lecture.course
-        return course and course.owner_id == request.user.id
+from CourseManagementApp.core.access import (
+    course_from, is_teacher, is_owner, is_student, is_submission_participant
+)
 
 
 class IsCourseTeacher(BasePermission):
-    """
-    Grants write access if the user is a teacher of the target course.
-    Supports nested routes by resolving course from kwargs:
-      - course_pk
-      - lecture_pk
-      - homework_pk
-    Read (SAFE_METHODS) always allowed (object filtering handled separately).
-    """
-    def _course_from_view(self, view):
-        if hasattr(view, "_resolved_course"):
-            return view._resolved_course
-        course = None
-        kw = view.kwargs
+    """Write access limited to course teachers (GET always allowed)."""
+
+    def _course_from_view(self, view: Any) -> Course | None:
+        course = getattr(view, "_resolved_course", None)
+        if course:
+            return course
+        kw = getattr(view, "kwargs", {})
         if "course_pk" in kw:
             course = get_object_or_404(Course, pk=kw["course_pk"])
         elif "lecture_pk" in kw:
@@ -39,77 +34,60 @@ class IsCourseTeacher(BasePermission):
             view._resolved_course = course
         return course
 
-    def _is_teacher(self, user, course):
-        if not course:
-            return False
-        return CourseMembership.objects.filter(
-            course=course, user=user, role=MemberRole.TEACHER
-        ).exists()
-
-    def has_permission(self, request, view):
+    def has_permission(self, request: Request, view: Any) -> bool:
         if request.method in SAFE_METHODS:
             return True
-        # For create/update/destroy on nested endpoints resolve cours
         course = self._course_from_view(view)
-        if course:
-            return self._is_teacher(request.user, course)
-        # If course not inferable (e.g. listing), defer to object checks
-        return True
+        return True if not course else is_teacher(request.user, course)
 
-    def has_object_permission(self, request, view, obj):
-        course = obj if isinstance(obj, Course) else getattr(obj, "course", None)
-        if course is None and hasattr(obj, "lecture"):
-            course = obj.lecture.course
-        return self._is_teacher(request.user, course)
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        return is_teacher(request.user, course_from(obj))
+
 
 class IsCourseTeacherOrOwner(BasePermission):
-    def has_object_permission(self, request, view, obj):
+    """Allow access if user is course owner or a teacher."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        course = course_from(obj)
+        return bool(course and (is_owner(request.user, course) or is_teacher(request.user, course)))
+
+class IsCourseOwner(BasePermission):
+    """Allow access only if the requesting user owns the course."""
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        """Object-level check: compare resolved course owner with user."""
         course = obj if isinstance(obj, Course) else getattr(obj, "course", None)
         if course is None and hasattr(obj, "lecture"):
             course = obj.lecture.course
-        if not course:
-            return False
-        if course.owner_id == request.user.id:
-            return True
-        return CourseMembership.objects.filter(
-            course=course, user=request.user, role=MemberRole.TEACHER
-        ).exists()
-
+        return course and course.owner_id == request.user.id
 
 class IsCourseStudent(BasePermission):
-    def has_object_permission(self, request, view, obj):
-        course = obj if isinstance(obj, Course) else getattr(obj, "course", None)
-        if course is None and hasattr(obj, "lecture"):
-            course = obj.lecture.course
-        return CourseMembership.objects.filter(
-            course=course, user=request.user, role=MemberRole.STUDENT
-        ).exists()
+    """Allow access if user is a student member of the course."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        return is_student(request.user, course_from(obj))
 
 
 class IsSubmissionOwner(BasePermission):
-    def has_object_permission(self, request, view, obj):
+    """Allow access only to the submission's student owner."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
         return getattr(obj, "student_id", None) == request.user.id
 
 
-class IsSubmissionParticipant(BasePermission):
-    def has_object_permission(self, request, view, obj):
-        # obj: Submission
-        course = obj.homework.lecture.course
-        if obj.student_id == request.user.id:
-            return True
-        return CourseMembership.objects.filter(
-            course=course, user=request.user, role=MemberRole.TEACHER
-        ).exists()
+class ParticipantPermission(BasePermission):
+    """Unified participant permission for Submission, Grade, GradeComment."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        return is_submission_participant(request.user, obj)
 
 
 class IsSubmissionAccess(BasePermission):
     """
-    Permission for submission endpoints:
-      - has_permission: user must be enrolled (student or teacher) in the submission's course
-        when homework_pk is present (nested route). Otherwise deny.
-      - has_object_permission: allow if student owner or a teacher of the course.
+    Permission for submission endpoints.
+    has_permission: require enrollment in the homework's course (nested routes).
+    has_object_permission: allow if submission owner or course teacher.
     """
-    def _course_from_homework(self, homework_id):
+    def _course_from_homework(self, homework_id: int | str) -> Any:
         from CourseManagementApp.learning.models import Homework
         try:
             hw = Homework.objects.select_related("lecture__course").get(pk=homework_id)
@@ -117,32 +95,23 @@ class IsSubmissionAccess(BasePermission):
             return None
         return hw.lecture.course
 
-    def has_permission(self, request, view):
+    def has_permission(self, request: Request, view: Any) -> bool:
         if not request.user or not request.user.is_authenticated:
             return False
         hw_id = view.kwargs.get("homework_pk")
         if not hw_id:
-            # Non‑nested (should not occur with current routing); fallback to auth check.
             return True
         course = self._course_from_homework(hw_id)
-        if not course:
-            return False
-        return CourseMembership.objects.filter(course=course, user=request.user).exists()
+        return bool(course and CourseMembership.objects.filter(course=course, user=request.user).exists())
 
-    def has_object_permission(self, request, view, obj):
-        course = obj.homework.lecture.course
-        if obj.student_id == request.user.id:
-            return True
-        return CourseMembership.objects.filter(
-            course=course, user=request.user, role=MemberRole.TEACHER
-        ).exists()
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
+        return is_submission_participant(request.user, obj)
 
 
 class IsGradeCommentParticipant(BasePermission):
-    """
-    Allows access (retrieve/destroy) if user is the comment author or a teacher of the course.
-    """
-    def has_object_permission(self, request, view, obj):
+    """Allow access if user authored the comment or is a teacher of the related course."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
         # obj: GradeComment
         if obj.author_id == request.user.id:
             return True
@@ -152,10 +121,9 @@ class IsGradeCommentParticipant(BasePermission):
         ).exists()
 
 class IsGradeParticipant(BasePermission):
-    """
-    Allows access (retrieve/destroy) if user is the grade author or a teacher of the course.
-    """
-    def has_object_permission(self, request, view, obj):
+    """Allow access if user graded it or is a teacher of the course."""
+
+    def has_object_permission(self, request: Request, view: Any, obj: Any) -> bool:
         # obj: Grade
         if obj.graded_by_id == request.user.id:
             return True
