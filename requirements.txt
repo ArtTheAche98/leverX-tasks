@@ -6,6 +6,8 @@
 #
 asgiref==3.9.1
     # via django
+astroid==3.3.11
+    # via pylint
 attrs==25.3.0
     # via
     #   jsonschema
@@ -14,11 +16,15 @@ black==25.1.0
     # via -r requirements.in
 click==8.2.1
     # via black
+dill==0.4.0
+    # via pylint
 django==5.2.5
     # via
     #   -r requirements.in
     #   django-filter
     #   django-simple-history
+    #   django-stubs
+    #   django-stubs-ext
     #   djangorestframework
     #   djangorestframework-simplejwt
     #   drf-nested-routers
@@ -28,6 +34,10 @@ django-filter==25.1
     # via -r requirements.in
 django-simple-history==3.10.1
     # via -r requirements.in
+django-stubs==5.2.2
+    # via -r requirements.in
+django-stubs-ext==5.2.2
+    # via django-stubs
 djangorestframework==3.16.1
     # via
     #   -r requirements.in
@@ -42,18 +52,28 @@ drf-spectacular==0.28.0
     # via -r requirements.in
 flake8==7.3.0
     # via -r requirements.in
+gitdb==4.0.12
+    # via gitpython
+gitpython==3.1.45
+    # via lint
 inflection==0.5.1
     # via drf-spectacular
 iniconfig==2.1.0
     # via pytest
 isort==6.0.1
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   pylint
 jsonschema==4.25.0
     # via drf-spectacular
 jsonschema-specifications==2025.4.1
     # via jsonschema
+lint==1.2.1
+    # via -r requirements.in
 mccabe==0.7.0
-    # via flake8
+    # via
+    #   flake8
+    #   pylint
 model-bakery==1.20.5
     # via -r requirements.in
 mypy==1.17.1
@@ -73,7 +93,9 @@ pathspec==0.12.1
 pillow==11.3.0
     # via -r requirements.in
 platformdirs==4.3.8
-    # via black
+    # via
+    #   black
+    #   pylint
 pluggy==1.6.0
     # via pytest
 pycodestyle==2.14.0
@@ -84,6 +106,8 @@ pygments==2.19.2
     # via pytest
 pyjwt==2.10.1
     # via djangorestframework-simplejwt
+pylint==3.3.8
+    # via lint
 pytest==8.4.1
     # via
     #   -r requirements.in
@@ -102,9 +126,18 @@ rpds-py==0.27.0
     # via
     #   jsonschema
     #   referencing
+smmap==5.0.2
+    # via gitdb
 sqlparse==0.5.3
     # via django
+tomlkit==0.13.3
+    # via pylint
+types-pyyaml==6.0.12.20250809
+    # via django-stubs
 typing-extensions==4.14.1
-    # via mypy
+    # via
+    #   django-stubs
+    #   django-stubs-ext
+    #   mypy
 uritemplate==4.2.0
     # via drf-spectacular
