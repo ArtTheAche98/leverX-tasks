@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework_nested import routers
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from drf_spectacular.utils import extend_schema
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from CourseManagementApp.api.views import (
@@ -14,6 +15,7 @@ from CourseManagementApp.api.views import (
 )
 
 router = routers.SimpleRouter()
+
 router.register(r"courses", CourseViewSet, basename="course")
 router.register(r"grades", GradeViewSet, basename="grade")
 router.register(r"grade-comments", GradeCommentViewSet, basename="gradecomment")
@@ -26,6 +28,15 @@ lectures_router.register(r"homework", HomeworkViewSet, basename="lecture-homewor
 
 homework_router = routers.NestedSimpleRouter(lectures_router, r"homework", lookup="homework")
 homework_router.register(r"submissions", SubmissionViewSet, basename="homework-submissions")
+
+@extend_schema(tags=["Auth"])
+class TokenObtainPairView(TokenObtainPairView):
+    pass
+
+@extend_schema(tags=["Auth"])
+class TokenRefreshView(TokenRefreshView):
+    pass
+
 
 urlpatterns = [
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
