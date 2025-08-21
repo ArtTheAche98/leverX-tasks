@@ -7,7 +7,7 @@ git clone git@github.com:ArtTheAche98/leverX-tasks.git
 cd CourseManagement
 ```
 
-2Create and activate a virtual environment:
+2.Create and activate a virtual environment:
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
