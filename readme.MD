@@ -24,18 +24,34 @@ cd CourseManagement
    ```bash
    pip-sync
    ```
-6.Apply migrations:
+6. Install libmagic (required for file type detection):
+
+   - **macOS:**  
+     ```bash
+     brew install libmagic
+     ```
+   - **Ubuntu/Debian:**  
+     ```bash
+     sudo apt-get install libmagic1
+     ```
+   - **Windows:**  
+     ```bash
+     choco install libmagic
+     ```
+     Or download and install from [GnuWin32](http://gnuwin32.sourceforge.net/packages/file.htm)
+
+7.Apply migrations:
    ```bash
    python manage.py migrate
    ```
-7.Start the server:
+8.Start the server:
    ```bash
    python manage.py runserver
    ```
-8.Access API docs:  
+9.Access API docs:  
    [http://127.0.0.1:8000/api/docs/](http://127.0.0.1:8000/api/docs/)
 
-9.Or download the API documentation at:
+10.Or download the API documentation at:
    [http://127.0.0.1:8000/api/schema/](http://127.0.0.1:8000/api/schema/)
 
 ### Docker Setup
