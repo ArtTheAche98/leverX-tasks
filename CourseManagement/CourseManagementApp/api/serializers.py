@@ -74,12 +74,41 @@ class MembershipWriteSerializer(serializers.Serializer):
 class LectureWriteSerializer(serializers.ModelSerializer):
     """Serializer for creating/updating lecture metadata and resources."""
 
+    presentation = serializers.FileField(required=False, allow_null=True, help_text=(
+        "Binary presentation file. Accepted MIME types: application/pdf, application/vnd.ms-powerpoint, "
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation. Max size: 10MB."
+    ))
+
     presentation_url = serializers.URLField(
         required=False,
         allow_null=True,
         allow_blank=True,
         help_text="HTTPS URL to external presentation resource."
     )
+
+
+    def validate(self, data):
+        has_file = bool(data.get("presentation"))
+        has_url = bool(data.get("presentation_url"))
+        if has_file == has_url:
+            # both true or both false -> invalid
+            raise serializers.ValidationError(
+                "Exactly one of `presentation` or `presentation_url` must be provided."
+            )
+        # optional: enforce file size/MIME here if presentation present
+        file = data.get("presentation")
+        if file:
+            # Example size check (10MB)
+            max_bytes = 10 * 1024 * 1024
+            if file.size > max_bytes:
+                raise serializers.ValidationError("Presentation file exceeds 10MB limit.")
+            # MIME check if available
+            content_type = getattr(file, "content_type", None)
+            allowed = {"application/pdf", "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"}
+            if content_type and content_type not in allowed:
+                raise serializers.ValidationError(f"Unsupported presentation MIME type: {content_type}.")
+        return super().validate(data)
+
 
     class Meta:
         model = Lecture
@@ -93,17 +122,6 @@ class LectureWriteSerializer(serializers.ModelSerializer):
             "is_published": {"help_text": "Publish flag controlling student visibility."},
         }
 
-    def validate_presentation_url(self, url: str | None) -> str | None:
-        """Validate URL resource location when provided."""
-        if url:
-            validate_resource_url(url)
-        return url
-
-    def validate(self, attrs: dict) -> dict:
-        """Ensure only one of presentation file or external URL is supplied."""
-        if attrs.get("presentation") and attrs.get("presentation_url"):
-            raise serializers.ValidationError("Provide either presentation file or presentation_url, not both.")
-        return attrs
 
 class LectureReadSerializer(serializers.ModelSerializer):
     """Serializer for reading lecture details."""
@@ -165,11 +183,10 @@ class SubmissionWriteSerializer(serializers.ModelSerializer):
             validate_attachment_mime(attachment)
         return attachment
 
-    def validate(self, attrs: dict) -> dict:
-        """Ensure at least text or attachment is provided."""
-        if not attrs.get("content_text") and not attrs.get("attachment"):
-            raise serializers.ValidationError("Either content_text or attachment must be provided.")
-        return attrs
+    def validate(self, data):
+        if not data.get("content_text") and not data.get("attachment"):
+            raise serializers.ValidationError("At least one of `content_text` or `attachment` is required.")
+        return super().validate(data)
 
 
 class SubmissionReadSerializer(serializers.ModelSerializer):
@@ -231,3 +248,12 @@ class CourseWaitlistEntrySerializer(serializers.ModelSerializer):
         model = CourseWaitlistEntry
         fields = ['id', 'course', 'student', 'created_at', 'approved']
         read_only_fields = ['id', 'created_at', 'approved']
+
+
+class WaitlistRequestSerializer(serializers.Serializer):
+    """Explicit body for a course join request (optional note)."""
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional note sent with the join request."
+    )

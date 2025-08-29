@@ -22,6 +22,7 @@ from drf_spectacular.utils import (
 from CourseManagementApp.courses.models import Course, CourseMembership, CourseWaitlistEntry
 from CourseManagementApp.core.access import is_teacher, is_owner
 from CourseManagementApp.api.mixins import PaginationMixin
+from CourseManagementApp.api.throttles import SubmissionRateThrottle
 from CourseManagementApp.core.permissions import ParticipantPermission
 from CourseManagementApp.core.choices import MemberRole
 from CourseManagementApp.domain.services import course_service, learning_service
@@ -58,9 +59,18 @@ from CourseManagementApp.api.serializers import (
     GradeCommentWriteSerializer,
     GradeCommentReadSerializer,
     CourseWaitlistEntrySerializer,
+    WaitlistRequestSerializer
 )
 
-from CourseManagementApp.api.throttles import SubmissionRateThrottle
+AUTH_RESPONSES = {
+    401: OpenApiResponse(description="Authentication required."),
+    403: OpenApiResponse(description="Forbidden"),
+    404: OpenApiResponse(description="Not Found"),
+}
+
+VALIDATION_RESPONSE = {
+    422: OpenApiResponse(description="Semantic validation failed."),
+}
 
 User = get_user_model()
 
@@ -68,7 +78,7 @@ User = get_user_model()
 @extend_schema(
     tags=["Auth"],
     request=RegistrationSerializer,
-    responses={201: UserSerializer, 400: OpenApiResponse(description="Validation error")},
+    responses={201: UserSerializer,**AUTH_RESPONSES, **VALIDATION_RESPONSE},
     description="Register a new user. Teacher role requires staff privileges."
 )
 class RegistrationView(APIView):
@@ -89,16 +99,16 @@ class RegistrationView(APIView):
         tags=["Courses"],
         responses={
             200: CourseReadSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
         }
     ),
     retrieve=extend_schema(
         tags=["Courses"],
         responses={
             200: CourseReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
         }
     ),
     create=extend_schema(
@@ -106,86 +116,98 @@ class RegistrationView(APIView):
         request=CourseWriteSerializer,
         responses={
             201: CourseReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions = {"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     update=extend_schema(
         tags=["Courses"],
         request=CourseWriteSerializer,
         responses={
             200: CourseReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
-    ),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions = {"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
+),
     partial_update=extend_schema(
         tags=["Courses"],
         request=CourseWriteSerializer,
         responses={
             200: CourseReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     destroy=extend_schema(
         tags=["Courses"],
         responses={
             204: OpenApiResponse(description="Deleted"),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     add_teacher=extend_schema(
         tags=["Membership"],
         request=MembershipWriteSerializer,
         responses={
             200: UserSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     add_student=extend_schema(
         tags=["Membership"],
         request=MembershipWriteSerializer,
         responses={
             200: UserSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     remove_member=extend_schema(
         tags=["Membership"],
         parameters=[OpenApiParameter("user_id", int, OpenApiParameter.PATH)],
         responses={
             204: OpenApiResponse(description="Removed"),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     members=extend_schema(
         tags=["Membership"],
         responses={
             200: UserSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
         }
     ),
-    request_join=extend_schema(
+    request_join = extend_schema(
         tags=["Courses"],
+        request=WaitlistRequestSerializer,
+        description="Request to join a course (creates a waitlist entry). Optional `message` may be provided.",
         responses={
             201: CourseWaitlistEntrySerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            400: OpenApiResponse(description="Validation error."),
             409: OpenApiResponse(description="Already requested."),
-        }
+            429: OpenApiResponse(description="Too many requests / throttled."),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["student"], "ownership": "self"}},
     ),
     waitlist=extend_schema(
         tags=["Courses"],
         responses={
             200: CourseWaitlistEntrySerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
         }
     ),
     approve_waitlist=extend_schema(
@@ -193,9 +215,10 @@ class RegistrationView(APIView):
         parameters=[OpenApiParameter("entry_id", int, OpenApiParameter.PATH)],
         responses={
             200: CourseWaitlistEntrySerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
 )
 class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
@@ -215,6 +238,15 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
         return CourseWriteSerializer
 
     def get_permissions(self) -> list:
+        """Respect method-level `permission_classes` if present, otherwise fall back to existing logic."""
+        method = getattr(self, self.action, None)
+        pcs = getattr(method, "permission_classes", None)
+        if pcs:
+            perms = []
+            for p in pcs:
+                perms.append(p() if isinstance(p, type) else p)
+            return perms
+
         teacher_actions = {
             "create", "update", "partial_update", "destroy",
             "add_teacher", "add_student", "remove_member",
@@ -274,7 +306,8 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
         course = self.get_object()
         ser = MembershipWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        user = get_object_or_404(User, pk=ser.validated_data["user_id"])
+        user_id = int(ser.validated_data["user_id"])
+        user = get_object_or_404(User, pk=user_id)
         membership = course_service.add_teacher(request.user, course, user)
         return Response(UserSerializer(membership.user).data)
 
@@ -284,7 +317,8 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
         course = self.get_object()
         ser = MembershipWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        user = get_object_or_404(User, pk=ser.validated_data["user_id"])
+        user_id = int(ser.validated_data["user_id"])
+        user = get_object_or_404(User, pk=user_id)
         membership = course_service.add_student(request.user, course, user)
         return Response(UserSerializer(membership.user).data)
 
@@ -299,6 +333,12 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def request_join(self, request: Request, pk: int | None = None) -> Response:
         """Create a waitlist entry for the requesting user."""
+        ser = WaitlistRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        if not getattr(request.user, "is_authenticated", False):
+            return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
         course = self.get_object()
         entry, created = CourseWaitlistEntry.objects.get_or_create(course=course, student=request.user)
         if not created:
@@ -317,13 +357,13 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
             permission_classes=[IsCourseTeacherOrOwner])
     def approve_waitlist(self, request: Request, pk: int | None = None, entry_id: int | None = None) -> Response:
         """Approve a waitlist entry and enroll the student."""
-        entry = get_object_or_404(CourseWaitlistEntry, id=entry_id, course=pk)
+        course = self.get_object()
+        entry = get_object_or_404(CourseWaitlistEntry, id=int(entry_id), course=course)
         entry.approved = True
         entry.save(update_fields=["approved"])
         if entry.approved:
-            course = entry.course
             course_service.add_student(course.owner, course, entry.student)
-        return Response(CourseWaitlistEntrySerializer(entry).data)
+        return Response(CourseWaitlistEntrySerializer(entry).data, status=200)
 
 
 # ---------- Lectures ----------
@@ -332,16 +372,16 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
         tags=["Lectures"],
         responses={
             200: LectureReadSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
         }
     ),
     retrieve=extend_schema(
         tags=["Lectures"],
         responses={
             200: LectureReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
         }
     ),
     create=extend_schema(
@@ -349,35 +389,39 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
         request=LectureWriteSerializer,
         responses={
             201: LectureReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     update=extend_schema(
         tags=["Lectures"],
         request=LectureWriteSerializer,
         responses={
             200: LectureReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     partial_update=extend_schema(
         tags=["Lectures"],
         request=LectureWriteSerializer,
         responses={
             200: LectureReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     destroy=extend_schema(
         tags=["Lectures"],
         responses={
             204: OpenApiResponse(description="Deleted"),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
 )
 class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
@@ -387,7 +431,7 @@ class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
     def get_permissions(self) -> list:
         if self.action in ("create", "update", "partial_update", "destroy"):
             return [IsAuthenticated(), IsCourseTeacherOrOwner()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
     def get_serializer_class(self):
         return LectureWriteSerializer if self.action in ("create", "update", "partial_update") else LectureReadSerializer
@@ -424,9 +468,12 @@ class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
         serializer.save()
 
     def perform_destroy(self, instance) -> None:
-        """Delete a lecture (teacher only)."""
+        """Delete a lecture (teacher only).
+        Deletion policy: *prohibit* deletion when dependent homework/submissions exist.
+        """
+        if Submission.objects.filter(homework__lecture=instance).exists():
+            raise PermissionDenied("Lecture cannot be deleted while dependent submissions exist.")
         super().perform_destroy(instance)
-
 
 # ---------- Homework ----------
 @extend_schema_view(
@@ -434,16 +481,16 @@ class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
         tags=["Homework"],
         responses={
             200: HomeworkReadSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
         }
     ),
     retrieve=extend_schema(
         tags=["Homework"],
         responses={
             200: HomeworkReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
         }
     ),
     create=extend_schema(
@@ -451,35 +498,39 @@ class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
         request=HomeworkWriteSerializer,
         responses={
             201: HomeworkReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     update=extend_schema(
         tags=["Homework"],
         request=HomeworkWriteSerializer,
         responses={
             200: HomeworkReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     partial_update=extend_schema(
         tags=["Homework"],
         request=HomeworkWriteSerializer,
         responses={
             200: HomeworkReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     ),
     destroy=extend_schema(
         tags=["Homework"],
         responses={
             204: OpenApiResponse(description="Deleted"),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     )
 )
 @extend_schema(
@@ -495,7 +546,7 @@ class HomeworkViewSet(viewsets.ModelViewSet):
     def get_permissions(self) -> list:
         if self.action in ("create", "update", "partial_update", "destroy"):
             return [IsAuthenticated(), IsCourseTeacherOrOwner()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
     def get_serializer_class(self):
         return HomeworkWriteSerializer if self.action in ("create", "update", "partial_update") else HomeworkReadSerializer
@@ -541,35 +592,56 @@ class HomeworkViewSet(viewsets.ModelViewSet):
         tags=["Submissions"],
         responses={
             200: SubmissionReadSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     retrieve=extend_schema(
         tags=["Submissions"],
         responses={
             200: SubmissionReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     create=extend_schema(
         tags=["Submissions"],
         request=SubmissionWriteSerializer,
+        description=(
+            "Create a submission. Endpoint is rate-limited; clients SHOULD provide an "
+            "`Idempotency-Key` header to avoid duplicate writes on retries. Server will return "
+            "rate-limit headers (e.g. `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`)."
+        ),
+        parameters=[
+            OpenApiParameter("Idempotency-Key", str, OpenApiParameter.HEADER, required=False,
+                             description="Client-provided idempotency key to deduplicate requests.")
+        ],
         responses={
             201: SubmissionReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            400: OpenApiResponse(description="Validation error."),
+            429: OpenApiResponse(description="Too many requests / throttled."),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["student"], "ownership": "self"}},
     ),
     partial_update=extend_schema(
         tags=["Submissions"],
         request=SubmissionWriteSerializer,
+        description=(
+            "Update / resubmit a submission. Same throttling/idempotency guidance as create. "
+            "Clients MAY supply `Idempotency-Key` to deduplicate retries."
+        ),
+        parameters=[
+            OpenApiParameter("Idempotency-Key", str, OpenApiParameter.HEADER, required=False,
+                             description="Client-provided idempotency key to deduplicate requests.")
+        ],
         responses={
             200: SubmissionReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            400: OpenApiResponse(description="Validation error."),
+            429: OpenApiResponse(description="Too many requests / throttled."),
+            **AUTH_RESPONSES,
+            **VALIDATION_RESPONSE,
+        },
+        extensions={"x-permissions": {"required_roles": ["student"], "ownership": "submission-owner"}},
     ),
 )
 @extend_schema(
@@ -652,9 +724,9 @@ class SubmissionViewSet(
         request=GradeWriteSerializer,
         responses={
             201: GradeReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES
+        },
+        extensions={"x-permissions": {"required_roles": ["teacher", "owner"], "ownership": "owner-on-create"}},
     )
     @action(detail=True, methods=["post"], url_path="grade", permission_classes=[IsAuthenticated, IsCourseTeacher])
     def grade(self, request: Request, pk: int | None = None, *args, **kwargs) -> Response:
@@ -677,8 +749,7 @@ class SubmissionViewSet(
         tags=["Grades"],
         responses={
             200: GradeReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     update=extend_schema(
@@ -686,8 +757,7 @@ class SubmissionViewSet(
         request=GradeWriteSerializer,
         responses={
             200: GradeReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     partial_update=extend_schema(
@@ -695,8 +765,7 @@ class SubmissionViewSet(
         request=GradeWriteSerializer,
         responses={
             200: GradeReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
 )
@@ -733,9 +802,9 @@ class GradeViewSet(
         parameters=[OpenApiParameter("submission_id", int, OpenApiParameter.PATH)],
         responses={
             200: GradeReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
-        }
+            **AUTH_RESPONSES,
+        },
+        extensions={"x-permissions": {"required_roles": ["student"], "ownership": "submission-owner"}},
     )
     @action(detail=False, methods=["get"], url_path=r"submission/(?P<submission_id>\d+)", permission_classes=[IsAuthenticated, ParticipantPermission])
     def by_submission(self, request: Request, submission_id: int | None = None) -> Response:
@@ -753,16 +822,14 @@ class GradeViewSet(
         tags=["GradeComments"],
         responses={
             200: GradeCommentReadSerializer(many=True),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     retrieve=extend_schema(
         tags=["GradeComments"],
         responses={
             200: GradeCommentReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     create=extend_schema(
@@ -770,8 +837,7 @@ class GradeViewSet(
         request=GradeCommentWriteSerializer,
         responses={
             201: GradeCommentReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     update=extend_schema(
@@ -779,8 +845,7 @@ class GradeViewSet(
         request=GradeCommentWriteSerializer,
         responses={
             200: GradeCommentReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     partial_update=extend_schema(
@@ -788,16 +853,14 @@ class GradeViewSet(
         request=GradeCommentWriteSerializer,
         responses={
             200: GradeCommentReadSerializer,
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
     destroy=extend_schema(
         tags=["GradeComments"],
         responses={
             204: OpenApiResponse(description="Deleted"),
-            403: OpenApiResponse(description="Forbidden"),
-            404: OpenApiResponse(description="Not Found"),
+            **AUTH_RESPONSES,
         }
     ),
 )
