@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.request import Request
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from drf_spectacular.utils import (
     extend_schema,
@@ -297,7 +298,7 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="members")
     def members(self, request: Request, pk: int | None = None) -> Response:
         course = self.get_object()
-        users = User.objects.filter(course_memberships__course=course).distinct()
+        users = User.objects.filter(course_memberships__course=course).distinct().order_by("id")
         return self.paginate_and_respond(users, UserSerializer)
 
     @action(detail=True, methods=["post"], url_path="members/add-teacher")
@@ -349,7 +350,7 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
     def waitlist(self, request: Request, pk: int | None = None) -> Response:
         """List pending waitlist entries."""
         course = self.get_object()
-        entries = course.waitlist.filter(approved=None)
+        entries = course.waitlist.filter(approved=None).order_by("id")
         ser = CourseWaitlistEntrySerializer(entries, many=True)
         return Response(ser.data)
 
@@ -427,6 +428,7 @@ class CourseViewSet(PaginationMixin, viewsets.ModelViewSet):
 class LectureViewSet(PaginationMixin, viewsets.ModelViewSet):
     """CRUD for lectures with course membership checks."""
     queryset = Lecture.objects.select_related("course", "created_by")
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self) -> list:
         if self.action in ("create", "update", "partial_update", "destroy"):

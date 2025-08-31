@@ -74,7 +74,10 @@ class MembershipWriteSerializer(serializers.Serializer):
 class LectureWriteSerializer(serializers.ModelSerializer):
     """Serializer for creating/updating lecture metadata and resources."""
 
-    presentation = serializers.FileField(required=False, allow_null=True, help_text=(
+    presentation = serializers.FileField(
+        required=False,
+        allow_null=True,
+        help_text=(
         "Binary presentation file. Accepted MIME types: application/pdf, application/vnd.ms-powerpoint, "
         "application/vnd.openxmlformats-officedocument.presentationml.presentation. Max size: 10MB."
     ))
@@ -86,6 +89,17 @@ class LectureWriteSerializer(serializers.ModelSerializer):
         help_text="HTTPS URL to external presentation resource."
     )
 
+    class Meta:
+        model = Lecture
+        fields = ["topic", "presentation", "presentation_url", "is_published"]
+        extra_kwargs = {
+            "topic": {"help_text": "Lecture topic/title."},
+            "presentation": {"help_text": "Optional uploaded presentation file."},
+            "presentation_url": {
+                "help_text": "HTTPS URL to presentation resource (e.g., GitHub, Drive)."
+            },
+            "is_published": {"help_text": "Publish flag controlling student visibility."},
+        }
 
     def validate(self, data):
         has_file = bool(data.get("presentation"))
@@ -109,18 +123,6 @@ class LectureWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f"Unsupported presentation MIME type: {content_type}.")
         return super().validate(data)
 
-
-    class Meta:
-        model = Lecture
-        fields = ["topic", "presentation", "presentation_url", "is_published"]
-        extra_kwargs = {
-            "topic": {"help_text": "Lecture topic/title."},
-            "presentation": {"help_text": "Optional uploaded presentation file."},
-            "presentation_url": {
-                "help_text": "HTTPS URL to presentation resource (e.g., GitHub, Drive)."
-            },
-            "is_published": {"help_text": "Publish flag controlling student visibility."},
-        }
 
 
 class LectureReadSerializer(serializers.ModelSerializer):
